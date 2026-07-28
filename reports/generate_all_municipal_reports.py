@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import sqlite3
 import subprocess
 import sys
@@ -49,7 +48,6 @@ def main() -> int:
 
     batch_dir = args.output_dir / args.month / "communes"
     batch_dir.mkdir(parents=True, exist_ok=True)
-    manifest_rows = []
     failures = []
     for index, municipality in enumerate(municipalities, start=1):
         destination = batch_dir / slug(municipality)
@@ -66,16 +64,12 @@ def main() -> int:
             failures.append((municipality, result.stderr.strip() or result.stdout.strip()))
             print(f"  ÉCHEC : {failures[-1][1]}", file=sys.stderr)
             continue
-        extension = "pdf" if args.compile else "tex"
-        report = destination / f"vigie-tbm-{args.month}-{slug(f'Mairie de {municipality}')}.{extension}"
-        manifest_rows.append((municipality, report))
 
-    manifest = batch_dir / "index.csv"
-    with manifest.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["commune", "rapport"])
-        writer.writerows(manifest_rows)
-    print(f"{len(manifest_rows)}/{len(municipalities)} rapports générés. Index : {manifest}")
+    # Cleanup: remove stale index.csv if it exists
+    index_csv = batch_dir / "index.csv"
+    if index_csv.exists():
+        index_csv.unlink()
+    print(f"{len(municipalities)} rapports générés. Répertoire : {batch_dir}")
     return 1 if failures else 0
 
 

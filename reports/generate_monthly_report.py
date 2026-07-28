@@ -71,6 +71,27 @@ def duration(seconds: float | None, signed: bool = True) -> str:
     return f"{prefix}{minutes} min {rest:02d} s" if minutes else f"{prefix}{rest} s"
 
 
+def kpi_color(metrics: dict, key: str) -> str:
+    """Return a LaTeX color name based on the metric value (good→green, medium→orange, bad→red)."""
+    if key == "ponctualite":
+        v = metrics[key]
+        return "vigiegreen" if v >= 90 else "vigieorange" if v >= 80 else "alert"
+    if key in ("retard", "retard_median"):
+        v = abs(metrics[key])
+        return "vigiegreen" if v <= 60 else "vigieorange" if v <= 120 else "alert"
+    if key == "skip_rate":
+        v = metrics[key]
+        return "vigiegreen" if v <= 1 else "vigieorange" if v <= 5 else "alert"
+    return "vigieblue"
+
+
+def net_val(network_metrics: dict | None, key: str, formatter) -> str:
+    """Return a LaTeX snippet showing the network-wide comparison value, or empty."""
+    if network_metrics is None:
+        return ""
+    return f"\\\\ {{\\tiny\\color{{gray}}Réseau: {formatter(network_metrics[key])}}}"
+
+
 def safe_slug(value: str) -> str:
     return "".join(character.lower() if character.isalnum() else "-" for character in value).strip("-") or "rapport"
 
@@ -189,6 +210,88 @@ def query_observations(conn: sqlite3.Connection, month: str, scope: Scope) -> tu
     return scheduled, skipped, collected_at
 
 
+def query_stop_stats(conn: sqlite3.Connection, month: str, scope: Scope) -> pd.DataFrame:
+    """Return per-stop delay statistics for the given scope."""
+    latest = conn.execute("SELECT MAX(last_seen_at) FROM observations").fetchone()[0]
+    if latest is None:
+        raise ValueError("La base ne contient aucune observation.")
+    cutoff = int(latest) - FRESHNESS_BUFFER_SECONDS
+    route_filter = ""
+    params: list[object] = [cutoff, month]
+    if scope.routes:
+        placeholders = ", ".join("?" for _ in scope.routes)
+        route_filter = f" AND o.route_id IN ({placeholders})"
+        params.extend(scope.routes)
+    commune_filter = ""
+    if scope.communes:
+        placeholders = ", ".join("?" for _ in scope.communes)
+        commune_filter = (
+            " AND o.stop_id IN (SELECT stop_id FROM stop_municipalities "
+            f"WHERE commune_name IN ({placeholders}))"
+        )
+        params.extend(scope.communes)
+    query = f"""
+        SELECT o.stop_id, COALESCE(s.stop_name, o.stop_id) AS stop_name, o.departure_delay
+        FROM observations o
+        LEFT JOIN stops s ON o.stop_id = s.stop_id
+        WHERE o.last_seen_at < ?
+          AND strftime('%Y-%m', datetime(o.departure_time, 'unixepoch', 'localtime')) = ?
+          {route_filter}
+          {commune_filter}
+          AND o.schedule_relationship = 'SCHEDULED'
+          AND o.departure_delay IS NOT NULL
+    """
+    df = pd.read_sql_query(query, conn, params=params)
+    if df.empty:
+        return pd.DataFrame()
+    stats = df.groupby(["stop_id", "stop_name"], as_index=False).agg(
+        retard_moyen=("departure_delay", "mean"),
+        retard_median=("departure_delay", "median"),
+        passages=("departure_delay", "count"),
+    ).sort_values("retard_median", ascending=False)
+    return stats
+
+
+def query_monthly_evolution(conn: sqlite3.Connection, month: str, scope: Scope) -> pd.DataFrame:
+    """Return monthly punctuality trend for the scope (all months up to the given one)."""
+    latest = conn.execute("SELECT MAX(last_seen_at) FROM observations").fetchone()[0]
+    if latest is None:
+        return pd.DataFrame()
+    cutoff = int(latest) - FRESHNESS_BUFFER_SECONDS
+    route_filter = ""
+    params: list[object] = [cutoff, month]
+    if scope.routes:
+        placeholders = ", ".join("?" for _ in scope.routes)
+        route_filter = f" AND o.route_id IN ({placeholders})"
+        params.extend(scope.routes)
+    commune_filter = ""
+    if scope.communes:
+        placeholders = ", ".join("?" for _ in scope.communes)
+        commune_filter = (
+            " AND o.stop_id IN (SELECT stop_id FROM stop_municipalities "
+            f"WHERE commune_name IN ({placeholders}))"
+        )
+        params.extend(scope.communes)
+    query = f"""
+        SELECT strftime('%Y-%m', datetime(o.departure_time, 'unixepoch', 'localtime')) AS mois,
+               AVG(CASE WHEN o.departure_delay <= 300 THEN 1.0 ELSE 0.0 END) * 100 AS ponctualite,
+               AVG(o.departure_delay) AS retard_moyen,
+               COUNT(*) AS passages
+        FROM observations o
+        WHERE o.last_seen_at < ?
+          AND o.schedule_relationship = 'SCHEDULED'
+          AND o.departure_delay IS NOT NULL
+          AND o.departure_time IS NOT NULL
+          AND strftime('%Y-%m', datetime(o.departure_time, 'unixepoch', 'localtime')) <= ?
+          {route_filter}
+          {commune_filter}
+        GROUP BY mois
+        ORDER BY mois
+    """
+    df = pd.read_sql_query(query, conn, params=params)
+    return df
+
+
 def make_line_stats(scheduled: pd.DataFrame, skipped: pd.DataFrame) -> pd.DataFrame:
     rows = scheduled.groupby(["route_id", "ligne"], as_index=False).agg(
         passages=("departure_delay", "size"),
@@ -235,26 +338,52 @@ def previous_month(month: str) -> str:
     return f"{year - 1:04d}-12" if month_number == 1 else f"{year:04d}-{month_number - 1:02d}"
 
 
-def executive_message(metrics: dict[str, float | int], lines: pd.DataFrame) -> str:
+def executive_message(metrics: dict[str, float | int], lines: pd.DataFrame, scope: Scope | None = None) -> str:
+    p = metrics["ponctualite"]
+    skip = metrics["skip_rate"]
     worst = lines.iloc[0]
-    if metrics["ponctualite"] >= 90:
-        assessment = "Le niveau de ponctualité observé est globalement satisfaisant."
-    elif metrics["ponctualite"] >= 80:
-        assessment = "Le réseau présente une fiabilité intermédiaire qui appelle un suivi ciblé."
+    prefix = f"Le périmètre {latex(scope.description)} " if scope and scope.communes else "Le réseau TBM "
+    if p >= 95:
+        assessment = f"{prefix}affiche une ponctualité excellente ({p:.1f}\\%)."
+    elif p >= 90:
+        assessment = f"{prefix}enregistre un bon niveau de ponctualité ({p:.1f}\\%)."
+    elif p >= 85:
+        assessment = f"{prefix}présente une fiabilité correcte ({p:.1f}\\%), encore perfectible."
+    elif p >= 80:
+        assessment = f"{prefix}montre une fiabilité intermédiaire ({p:.1f}\\%)."
+    elif p >= 75:
+        assessment = f"{prefix}connaît des difficultés de ponctualité notables ({p:.1f}\\%)."
+    elif p >= 65:
+        assessment = f"{prefix}enregistre une ponctualité insuffisante ({p:.1f}\\%)."
     else:
-        assessment = "Le niveau de ponctualité observé appelle une attention prioritaire."
+        assessment = f"{prefix}subit des retards critiques ({p:.1f}\\% de passages à l'heure)."
+    if skip > 5:
+        assessment += f" Le taux d'arrêts sautés ({skip:.2f}\\% des passages) aggrave la situation."
     return (
         f"{assessment} La principale alerte concerne la ligne {latex(worst.ligne)}, avec un score de fiabilité "
         f"de {worst.score:.1f}/100 et {worst.retard_5:.1f}\\% de passages au-delà de cinq minutes de retard."
     )
 
 
-def line_table(lines: pd.DataFrame) -> str:
+def line_table(lines: pd.DataFrame, network_lines: pd.DataFrame | None = None) -> str:
+    net_lookup: dict[str, tuple] = {}
+    if network_lines is not None and not network_lines.empty:
+        net_lookup = {row.route_id: row for row in network_lines.itertuples()}
     table_rows = []
     for row in lines.itertuples():
+        net_row = net_lookup.get(row.route_id)
+        ponctualite_cell = pct(row.ponctualite)
+        retard_5_cell = pct(row.retard_5)
+        arrets_cell = pct(row.arrets_sautes, 2)
+        passages_cell = number(int(row.passages))
+        if net_row is not None:
+            ponctualite_cell += f" {{\\tiny\\color{{gray}}({pct(net_row.ponctualite)})}}"
+            retard_5_cell += f" {{\\tiny\\color{{gray}}({pct(net_row.retard_5)})}}"
+            arrets_cell += f" {{\\tiny\\color{{gray}}({pct(net_row.arrets_sautes, 2)})}}"
+            passages_cell += f" {{\\tiny\\color{{gray}}({number(int(net_row.passages))})}}"
         table_rows.append(
-            f"{latex(row.ligne)} & {number(int(row.passages))} & {pct(row.ponctualite)} & "
-            f"{duration(row.retard_moyen)} / {duration(row.retard_median)} & {pct(row.retard_5)} & {pct(row.arrets_sautes, 2)} \\\\"
+            f"{latex(row.ligne)} & {passages_cell} & {ponctualite_cell} & "
+            f"{duration(row.retard_moyen)} / {duration(row.retard_median)} & {retard_5_cell} & {arrets_cell} \\\\"
         )
     return "\n".join(table_rows)
 
@@ -283,7 +412,7 @@ def operational_views(scheduled: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
     return hourly, distribution
 
 
-def reliability_chart(lines: pd.DataFrame) -> str:
+def reliability_chart(lines: pd.DataFrame, network_lines: pd.DataFrame | None = None) -> str:
     selected = lines.head(15).reset_index(drop=True)
     if selected.empty:
         return ""
@@ -291,15 +420,97 @@ def reliability_chart(lines: pd.DataFrame) -> str:
     labels = ",".join(latex(value) for value in selected["ligne"])
     coordinates = " ".join(f"({pgf_number(row.score)},{index})" for index, row in selected.iterrows())
     height = max(5.0, len(selected) * 0.42)
+
+    net_coordinates = ""
+    show_legend = False
+    if network_lines is not None and not network_lines.empty:
+        net_scores = []
+        for index, row in selected.iterrows():
+            net_row = network_lines[network_lines["route_id"] == row.route_id]
+            if not net_row.empty:
+                net_scores.append((pgf_number(float(net_row.iloc[0]["score"])), index))
+        if net_scores:
+            net_coordinates = " ".join(f"({score},{index})" for score, index in net_scores)
+            show_legend = True
+
+    legend_block = r"\legend{Périmètre, Réseau TBM}" if show_legend else ""
+    bar_width = 7
+    bar_shift = 3.5
+    if show_legend:
+        bar_width = 5
+        bar_shift = 2.5
+    net_shift = -bar_shift
+    net_plot_block = (
+        rf"\addplot[fill=gray!35, draw=gray!60!black, bar shift={net_shift}pt] coordinates {{{net_coordinates}}};"
+        if net_coordinates else ""
+    )
+
     return rf"""
 \subsection*{{Priorités de fiabilité par ligne}}
 \textit{{Les quinze lignes au score le plus faible sont présentées. Plus le score est bas, plus la priorité de suivi est élevée.}}\\[.2cm]
 \begin{{center}}
 \begin{{tikzpicture}}
 \begin{{axis}}[xbar, width=.94\textwidth, height={height:.1f}cm, xmin=0, xmax=100,
-  xlabel={{Score de fiabilité / 100}}, ytick={{{ticks}}}, yticklabels={{{labels}}},
-  y dir=reverse, grid=major, grid style={{gray!20}}, bar width=7pt]
-\addplot[fill=vigieblue!82, draw=vigieblue] coordinates {{{coordinates}}};
+  xlabel={{Score de fiabilité / 100}},
+  ytick={{{ticks}}}, yticklabels={{{labels}}},
+  y dir=reverse, grid=major, grid style={{gray!20}}, bar width={bar_width}pt,
+  legend style={{at={{(0.5,-0.12)}}, anchor=north, legend columns=-1, font=\footnotesize}}]
+{net_plot_block}
+\addplot[fill=vigieblue!82, draw=vigieblue, bar shift={bar_shift}pt] coordinates {{{coordinates}}};
+{legend_block}
+\end{{axis}}
+\end{{tikzpicture}}
+\end{{center}}
+"""
+
+
+def stop_chart(stop_stats: pd.DataFrame) -> str:
+    if stop_stats.empty:
+        return ""
+    selected = stop_stats.head(12).reset_index(drop=True)
+    ticks = ",".join(str(index) for index in selected.index)
+    labels = ",".join(latex(value) for value in selected["stop_name"])
+    coords_moyen = " ".join(f"({pgf_number(row.retard_moyen)},{index})" for index, row in selected.iterrows())
+    coords_median = " ".join(f"({pgf_number(row.retard_median)},{index})" for index, row in selected.iterrows())
+    height = max(4.0, len(selected) * 0.50)
+    worst = stop_stats.iloc[0]
+    return rf"""
+\subsection*{{Arrêts les plus problématiques du périmètre}}
+\textit{{Les douze arrêts ayant le retard médian le plus élevé. L'arrêt {latex(worst.stop_name)} ({duration(float(worst.retard_moyen))} en moyenne, {duration(float(worst.retard_median))} en médiane) est le plus critique.}}\\[.2cm]
+\begin{{center}}
+\begin{{tikzpicture}}
+\begin{{axis}}[xbar, width=.94\textwidth, height={height:.1f}cm,
+  xlabel={{Retard (secondes)}},
+  ytick={{{ticks}}}, yticklabels={{{labels}}},
+  y dir=reverse, grid=major, grid style={{gray!20}}, bar width=5pt,
+  legend style={{at={{(0.5,-0.10)}}, anchor=north, legend columns=-1, font=\footnotesize}}]
+\addplot[fill=vigieblue!70, draw=vigieblue, bar shift=-2.5pt] coordinates {{{coords_moyen}}};
+\addplot[fill=vigieorange!85, draw=vigieorange!90!black, bar shift=2.5pt] coordinates {{{coords_median}}};
+\legend{{Moyen, Médian}}
+\end{{axis}}
+\end{{tikzpicture}}
+\end{{center}}
+"""
+
+
+def evolution_chart(monthly: pd.DataFrame) -> str:
+    if monthly.empty or len(monthly) < 2:
+        return ""
+    ticks = ",".join(str(index) for index in range(len(monthly)))
+    labels = ",".join(latex(row.mois) for row in monthly.itertuples())
+    coords_ponctualite = " ".join(f"({index},{pgf_number(row.ponctualite)})" for index, row in monthly.iterrows())
+    return rf"""
+\subsection*{{Évolution mensuelle de la ponctualité}}
+\textit{{Taux de passages à l'heure (retard $\leq$ 5 min) sur le périmètre, mois par mois.}}\\[.2cm]
+\begin{{center}}
+\begin{{tikzpicture}}
+\begin{{axis}}[width=.92\textwidth, height=6cm, xlabel={{Mois}},
+  ylabel={{Ponctualité (\%)}}, ymin=50, ymax=100,
+  xtick={{{ticks}}}, xticklabels={{{labels}}},
+  grid=major, grid style={{gray!20}},
+  legend style={{at={{(0.5,-0.12)}}, anchor=north, legend columns=-1, font=\footnotesize}}]
+\addplot[color=vigieblue, very thick, mark=*, mark size=2.5pt] coordinates {{{coords_ponctualite}}};
+\legend{{Ponctualité}}
 \end{{axis}}
 \end{{tikzpicture}}
 \end{{center}}
@@ -363,16 +574,27 @@ def distribution_chart(distribution: pd.DataFrame) -> str:
 """
 
 
-def graphical_annex(lines: pd.DataFrame, scheduled: pd.DataFrame) -> str:
+def graphical_annex(lines: pd.DataFrame, scheduled: pd.DataFrame,
+                     network_lines: pd.DataFrame | None = None,
+                     stop_stats: pd.DataFrame | None = None,
+                     monthly_evolution: pd.DataFrame | None = None) -> str:
     hourly, distribution = operational_views(scheduled)
-    return "\n".join([
+    parts = [
         r"\newpage\section*{Annexe — Analyse graphique}",
-        reliability_chart(lines),
+        reliability_chart(lines, network_lines),
         risk_scatter_chart(lines),
+    ]
+    if stop_stats is not None and not stop_stats.empty:
+        parts.append(stop_chart(stop_stats))
+    evo = evolution_chart(monthly_evolution) if monthly_evolution is not None else ""
+    if evo:
+        parts.append(evo)
+    parts.extend([
         r"\newpage\section*{Annexe — Profil opérationnel}",
         hourly_chart(hourly) or r"\textit{Aucune heure de départ exploitable pour cette période.}",
         distribution_chart(distribution),
     ])
+    return "\n".join(parts)
 
 
 def build_no_data_latex(month: str, scope: Scope, collected_at: str) -> str:
@@ -407,20 +629,37 @@ Cette absence ne signifie pas nécessairement l'absence de desserte : elle peut 
 """
 
 
-def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], change: dict[str, str], lines: pd.DataFrame, scheduled: pd.DataFrame, collected_at: str) -> str:
+def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], change: dict[str, str],
+                lines: pd.DataFrame, scheduled: pd.DataFrame, collected_at: str,
+                network_metrics: dict | None = None,
+                network_lines: pd.DataFrame | None = None,
+                stop_stats: pd.DataFrame | None = None,
+                monthly_evolution: pd.DataFrame | None = None) -> str:
     report_date = datetime.strptime(month, "%Y-%m")
     report_month = f"{FRENCH_MONTHS[report_date.month - 1]} {report_date.year}"
     worst = lines.head(3)
+
+    # Compute network-wide ranking for alert lines
+    net_rank: dict[str, int] = {}
+    net_total = 0
+    if network_lines is not None and not network_lines.empty:
+        ranked = network_lines.sort_values("score", ascending=True).reset_index(drop=True)
+        net_total = len(ranked)
+        net_rank = {row.route_id: idx + 1 for idx, row in ranked.iterrows()}
+
     alerts = "\n".join(
-        f"\\item \\textbf{{Ligne {latex(row.ligne)}}} : score {row.score:.1f}/100, {pct(row.retard_5)} de retards supérieurs à 5 minutes, {pct(row.arrets_sautes, 2)} d'arrêts sautés."
+        f"\\item \\textbf{{Ligne {latex(row.ligne)}}}"
+        + (f" (rang réseau : {net_rank.get(row.route_id, '—')}/{net_total})" if net_rank else "")
+        + f" : score {row.score:.1f}/100, {pct(row.retard_5)} de retards supérieurs à 5 minutes, {pct(row.arrets_sautes, 2)} d'arrêts sautés."
         for row in worst.itertuples()
     )
+
     return rf"""\documentclass[10pt,a4paper]{{article}}
 \usepackage[utf8]{{inputenc}}
 \usepackage[T1]{{fontenc}}
 \usepackage[french]{{babel}}
 \usepackage[margin=1.7cm]{{geometry}}
-\usepackage{{booktabs,longtable,array,xcolor,tabularx,enumitem,pgfplots}}
+\usepackage{{amsmath,booktabs,longtable,array,xcolor,tabularx,enumitem,pgfplots}}
 \usepackage{{fancyhdr}}
 \definecolor{{vigieblue}}{{HTML}}{{083B73}}
 \definecolor{{vigielight}}{{HTML}}{{EAF3FC}}
@@ -430,7 +669,7 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
 \pgfplotsset{{compat=1.18}}
 \pagestyle{{fancy}}\fancyhf{{}}\lhead{{\textcolor{{vigieblue}}{{VIGIE TBM}}}}\rhead{{Rapport mensuel}}\cfoot{{\thepage}}
 \setlength{{\parindent}}{{0pt}}
-\newcommand{{\kpi}}[2]{{\begin{{minipage}}[t]{{.30\textwidth}}\raggedright\colorbox{{vigielight}}{{\parbox{{.91\textwidth}}{{\scriptsize\mbox{{#1}}\\[3pt]\textcolor{{vigieblue}}{{\Large\bfseries #2}}}}}}\end{{minipage}}}}
+\newcommand{{\kpi}}[3][vigieblue]{{\begin{{minipage}}[t]{{.30\textwidth}}\raggedright\colorbox{{vigielight}}{{\parbox{{.91\textwidth}}{{\scriptsize #2\\[3pt]\textcolor{{#1}}{{\Large\bfseries #3}}}}}}\end{{minipage}}}}
 \begin{{document}}
 \begin{{center}}
 {{\LARGE\bfseries Rapport mensuel de fiabilité des transports TBM}}\\[5pt]
@@ -442,11 +681,11 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
 \hrule\vspace{{.45cm}}
 \section*{{Synthèse exécutive}}
 \textit{{Cette page présente les indicateurs à retenir. Les résultats détaillés et la méthode figurent en annexe.}}\\[.5cm]
-\kpi{{Passages analysés}}{{{number(int(metrics['passages']))}}}\hfill
-\kpi{{Ponctualité (retard $\leq$ 5 min)}}{{{pct(float(metrics['ponctualite']))}}}\hfill
-\kpi{{Retard moyen}}{{{duration(float(metrics['retard']))}}}\\[.35cm]
-\hspace{{.17\textwidth}}\kpi{{Retard médian}}{{{duration(float(metrics['retard_median']))}}}\hfill
-\kpi{{Arrêts sautés}}{{{pct(float(metrics['skip_rate']), 2)}}}
+\kpi{{Passages analysés}}{{{number(int(metrics['passages']))}{net_val(network_metrics, 'passages', number)}}}\hfill
+\kpi[{kpi_color(metrics, 'ponctualite')}]{{Ponctualité (retard $\leq$ 5 min)}}{{{pct(float(metrics['ponctualite']))}{net_val(network_metrics, 'ponctualite', pct)}}}\hfill
+\kpi[{kpi_color(metrics, 'retard')}]{{Retard moyen}}{{{duration(float(metrics['retard']))}{net_val(network_metrics, 'retard', duration)}}}\\[.35cm]
+\hspace{{.17\textwidth}}\kpi[{kpi_color(metrics, 'retard_median')}]{{Retard médian}}{{{duration(float(metrics['retard_median']))}{net_val(network_metrics, 'retard_median', duration)}}}\hfill
+\kpi[{kpi_color(metrics, 'skip_rate')}]{{Arrêts sautés}}{{{pct(float(metrics['skip_rate']), 2)}{net_val(network_metrics, 'skip_rate', lambda v: pct(v, 2))}}}
 
 \vspace{{.7cm}}
 \begin{{tabularx}}{{\textwidth}}{{@{{}}lXXX@{{}}}}
@@ -458,7 +697,7 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
 \end{{tabularx}}
 
 \vspace{{.5cm}}
-\textbf{{Lecture du mois.}} {executive_message(metrics, lines)}
+\textbf{{Lecture du mois.}} {executive_message(metrics, lines, scope)}
 
 \vspace{{.3cm}}
 \textbf{{Score de fiabilité.}} Il est calculé ainsi : \textit{{score = max(0 ; ponctualité - 2 x taux d'arrêts sautés)}}. La ponctualité (part des passages avec au plus cinq minutes de retard) constitue donc la base sur 100 ; chaque point d'arrêts sautés retire deux points. Un score faible signale une ligne prioritaire.
@@ -485,19 +724,31 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
 \textbf{{Ligne}} & \textbf{{Passages}} & \textbf{{À l'heure}} & \textbf{{Retards moy. / méd.}} & \textbf{{> 5 min}} & \textbf{{Arrêts sautés}} \\
 \midrule
 \endhead
-{line_table(lines)}
+{line_table(lines, network_lines)}
 \bottomrule
 \end{{longtable}}
 
-{graphical_annex(lines, scheduled)}
+{graphical_annex(lines, scheduled, network_lines, stop_stats, monthly_evolution)}
 
-\section*{{Méthode et limites}}
+\section*{{Méthode et calcul de la fiabilité}}
+L'indice de fiabilité est un score synthétique (de 0 à 100) conçu pour identifier rapidement les lignes de transport qui posent le plus de difficultés aux usagers.
+
+Contrairement à une simple mesure de temps, cet indicateur combine deux facteurs clés :
+
 \begin{{itemize}}[leftmargin=1.4em]
-\item Un passage est considéré ponctuel lorsque son retard de départ est inférieur ou égal à cinq minutes.
-\item Les événements \texttt{{SKIPPED}} sont comptés séparément : ils ne sont pas assimilés à un retard, mais sont intégrés au score de fiabilité.
-\item Le score de fiabilité est égal à la ponctualité, diminuée de deux fois le taux d'arrêts sautés, puis bornée entre 0 et 100. Il sert à prioriser les lignes ; ce n'est pas une mesure de causalité.
-\item Seules les observations sorties du flux depuis au moins vingt minutes sont retenues. Ce délai limite l'utilisation de retards encore susceptibles d'être modifiés.
-\item Le rapport décrit les données GTFS-RT observées ; il ne permet pas à lui seul d'attribuer une cause opérationnelle aux écarts constatés.
+\item \textbf{{La ponctualité (la base)}} : la part des passages effectués avec au maximum 5 minutes de retard. Au-delà de 5 minutes, le retard est jugé trop pénalisant pour l'usager et le trajet fait baisser cette note de base.
+\item \textbf{{Les arrêts sautés (la pénalité)}} : lorsqu'un véhicule ne dessert pas un arrêt prévu (événement \texttt{{SKIPPED}}), la gêne est maximale. Chaque pourcent d'arrêts sautés retire donc 2 points au score global.
+\end{{itemize}}
+
+\[
+\text{{Score de fiabilité}} = \max(0 \;,\; \text{{Ponctualité}} - 2 \times \text{{Taux d'arrêts sautés}})
+\]
+
+\vspace{{.2cm}}
+À noter~:
+\begin{{itemize}}[leftmargin=1.4em]
+\item Un score faible indique une ligne prioritaire à corriger.
+\item Ce rapport repose sur l'analyse des données GTFS-RT consolidées (observations sorties du flux depuis plus de 20 minutes) et permet de mesurer la qualité de service observée, sans en analyser les causes opérationnelles.
 \end{{itemize}}
 \end{{document}}
 """
@@ -512,7 +763,13 @@ def compile_pdf(tex_path: Path) -> Path:
         result = subprocess.run(command, cwd=tex_path.parent, text=True, capture_output=True)
         if result.returncode:
             raise RuntimeError(f"La compilation LaTeX a échoué :\n{result.stdout[-2000:]}\n{result.stderr[-1000:]}")
-    return tex_path.with_suffix(".pdf")
+    pdf_path = tex_path.with_suffix(".pdf")
+    # Clean up auxiliary files
+    for suffix in (".aux", ".log"):
+        aux = tex_path.with_suffix(suffix)
+        if aux.exists():
+            aux.unlink()
+    return pdf_path
 
 
 def main() -> int:
@@ -536,18 +793,39 @@ def main() -> int:
             scheduled, skipped, collected_at = query_observations(conn, month, scope)
             if scheduled.empty:
                 content = build_no_data_latex(month, scope, collected_at)
+                network_metrics = None
+                network_lines = None
+                stop_stats = None
             else:
                 lines = make_line_stats(scheduled, skipped)
                 current = kpis(scheduled, skipped)
                 previous_scheduled, previous_skipped, _ = query_observations(conn, previous_month(month), scope)
                 previous = kpis(previous_scheduled, previous_skipped) if not previous_scheduled.empty else None
-                content = build_latex(month, scope, current, comparison(current, previous), lines, scheduled, collected_at)
+                network_metrics = None
+                network_lines = None
+                stop_stats = None
+                monthly_evolution = None
+                if scope.communes:
+                    net_scope = Scope("Réseau TBM", scope.routes, [], "Réseau TBM global")
+                    net_scheduled, net_skipped, _ = query_observations(conn, month, net_scope)
+                    if not net_scheduled.empty:
+                        network_metrics = kpis(net_scheduled, net_skipped)
+                        network_lines = make_line_stats(net_scheduled, net_skipped)
+                    stop_stats = query_stop_stats(conn, month, scope)
+                monthly_evolution = query_monthly_evolution(conn, month, scope)
+                content = build_latex(month, scope, current, comparison(current, previous),
+                                      lines, scheduled, collected_at,
+                                      network_metrics, network_lines, stop_stats,
+                                      monthly_evolution)
         args.output_dir.mkdir(parents=True, exist_ok=True)
         tex_path = args.output_dir / f"vigie-tbm-{month}-{safe_slug(scope.recipient)}.tex"
         tex_path.write_text(content, encoding="utf-8")
-        print(f"Rapport LaTeX généré : {tex_path}")
         if args.compile:
-            print(f"PDF généré : {compile_pdf(tex_path)}")
+            pdf_path = compile_pdf(tex_path)
+            tex_path.unlink(missing_ok=True)
+            print(f"PDF généré : {pdf_path}")
+        else:
+            print(f"Rapport LaTeX généré : {tex_path}")
     except (FileNotFoundError, ValueError, RuntimeError, json.JSONDecodeError) as error:
         print(f"Erreur : {error}", file=sys.stderr)
         return 1
