@@ -1,7 +1,7 @@
 import sqlite3
 
-conn = sqlite3.connect("vigie_tbm.db")
-conn.execute("""
+conn = sqlite3.connect("./data/vigie_tbm.db")
+conn.executescript("""
 CREATE TABLE IF NOT EXISTS observations (
     trip_id TEXT NOT NULL,
     start_date TEXT NOT NULL,
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS observations (
     departure_time INTEGER,
     last_seen_at INTEGER NOT NULL,
     PRIMARY KEY (trip_id, start_date, stop_sequence)
-)
+);
 
 CREATE TABLE IF NOT EXISTS daily_line_stats (
     stat_date TEXT NOT NULL,
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS daily_line_stats (
     n_arrets_sautes INTEGER,
     computed_at INTEGER NOT NULL,
     PRIMARY KEY (stat_date, route_id)
-)
+);
 
 CREATE TABLE IF NOT EXISTS collection_gaps (
     gap_start INTEGER NOT NULL,
