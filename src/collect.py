@@ -19,6 +19,8 @@ URL_TRIPUPDATES = (
 )
 DB_PATH = "data/vigie_tbm.db"
 POLL_INTERVAL_SECONDS = 60
+GAP_THRESHOLD_SECONDS = 180  # 3x l'intervalle normal de 60s, marge de sécurité
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -103,14 +105,36 @@ def process_feed(conn, feed: gtfs_realtime_pb2.FeedMessage) -> int:
     return n_rows
 
 
+def record_gap_if_any(conn, last_success_ts, now):
+    if last_success_ts is not None and (now - last_success_ts) > GAP_THRESHOLD_SECONDS:
+        conn.execute(
+            "INSERT INTO collection_gaps (gap_start, gap_end) VALUES (?, ?)",
+            (int(last_success_ts), int(now)),
+        )
+        conn.commit()
+        logger.warning("Trou de collecte détecté : %.0f minutes", (now - last_success_ts) / 60)
+
+
+def get_last_known_success(conn):
+    row = conn.execute("SELECT MAX(last_seen_at) FROM observations").fetchone()
+    return float(row[0]) if row[0] is not None else None
+
+
 def main():
     conn = sqlite3.connect(DB_PATH)
     logger.info("Démarrage de la collecte Vigie TBM (intervalle: %ss)", POLL_INTERVAL_SECONDS)
+
+    last_success_ts = get_last_known_success(conn)
 
     while True:
         cycle_start = time.monotonic()
         try:
             feed = fetch_feed()
+
+            now = time.time()
+            record_gap_if_any(conn, last_success_ts, now)
+            last_success_ts = now
+
             n_rows = process_feed(conn, feed)
             logger.info(
                 "OK - %d entités, %d observations mises à jour (feed ts=%s)",
@@ -123,7 +147,6 @@ def main():
 
         elapsed = time.monotonic() - cycle_start
         time.sleep(max(0, POLL_INTERVAL_SECONDS - elapsed))
-
 
 if __name__ == "__main__":
     main()

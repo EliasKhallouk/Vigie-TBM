@@ -30,6 +30,11 @@ CREATE TABLE IF NOT EXISTS daily_line_stats (
     computed_at INTEGER NOT NULL,
     PRIMARY KEY (stat_date, route_id)
 )
+
+CREATE TABLE IF NOT EXISTS collection_gaps (
+    gap_start INTEGER NOT NULL,
+    gap_end INTEGER NOT NULL
+)
 """)
 conn.commit()
 

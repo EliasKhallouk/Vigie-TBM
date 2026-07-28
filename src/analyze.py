@@ -14,27 +14,28 @@ DB_PATH = "data/vigie_tbm.db"
 FRESHNESS_BUFFER_SECONDS = 20 * 60  # 20 minutes
 
 
-def load_completed_observations(conn: sqlite3.Connection) -> pd.DataFrame:
+def load_completed_observations(conn):
     max_ts = conn.execute("SELECT MAX(last_seen_at) FROM observations").fetchone()[0]
     cutoff = max_ts - FRESHNESS_BUFFER_SECONDS
 
+    gaps = conn.execute("SELECT gap_start, gap_end FROM collection_gaps").fetchall()
+
     query = """
-        SELECT
-            o.route_id,
-            r.route_short_name,
-            r.route_type,
-            o.stop_id,
-            s.stop_name,
-            o.stop_sequence,
-            o.departure_delay,
-            o.schedule_relationship,
-            o.last_seen_at
+        SELECT o.*, r.route_short_name, s.stop_name
         FROM observations o
         LEFT JOIN routes r ON o.route_id = r.route_id
         LEFT JOIN stops s ON o.stop_id = s.stop_id
         WHERE o.last_seen_at < ?
     """
-    return pd.read_sql(query, conn, params=(cutoff,))
+    df = pd.read_sql(query, conn, params=(cutoff,))
+
+    # Exclure toute observation figée juste avant un trou de collecte connu
+    for gap_start, gap_end in gaps:
+        suspect_window_start = gap_start - FRESHNESS_BUFFER_SECONDS
+        df = df[~df["last_seen_at"].between(suspect_window_start, gap_end)]
+
+    return df
+
 
 def compute_line_stats(df: pd.DataFrame) -> pd.DataFrame:
     # On exclut les arrêts sautés (SKIPPED) du calcul de retard,
