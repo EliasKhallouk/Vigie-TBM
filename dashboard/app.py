@@ -200,6 +200,31 @@ def load_collection_stats(conn: sqlite3.Connection) -> dict:
     }
 
 
+@st.cache_data(ttl=60)
+def load_collection_minutely(_conn, start_ts, end_ts):
+    df = pd.read_sql_query(
+        """
+        SELECT datetime(
+            CAST(last_seen_at / 60 AS INTEGER) * 60,
+            'unixepoch', 'localtime'
+        ) AS minute,
+        COUNT(*) AS observations
+        FROM observations
+        WHERE last_seen_at >= ? AND last_seen_at < ?
+        GROUP BY minute ORDER BY minute
+        """,
+        _conn, params=(start_ts, end_ts),
+    )
+    if df.empty:
+        return df
+    df["minute"] = pd.to_datetime(df["minute"])
+    debut = datetime.fromtimestamp(start_ts).replace(second=0, microsecond=0)
+    fin = datetime.fromtimestamp(end_ts).replace(second=0, microsecond=0)
+    idx = pd.date_range(start=debut, end=fin, freq="min")
+    df = df.set_index("minute").reindex(idx).rename_axis("minute").reset_index()
+    return df
+
+
 def style_chart(chart: alt.Chart | alt.LayerChart) -> alt.Chart | alt.LayerChart:
     """Apply the common dark theme after a chart is fully assembled."""
     return chart.configure_view(strokeOpacity=0).configure_axis(
@@ -324,17 +349,52 @@ def main() -> None:
             c5.metric("Dernière date", format_date(stats["last_ts"]))
             left, right = st.columns(2, gap="large")
             with left:
-                st.markdown("#### Observations par jour")
-                daily = stats["daily"]
-                if daily.empty or len(daily) < 1:
-                    st.info("Aucune donnée quotidienne.")
+                st.markdown("#### Observations par minute")
+                last_ts = stats["last_ts"]
+                if not last_ts:
+                    st.info("Aucune donnée disponible.")
                 else:
-                    line = alt.Chart(daily).mark_line(stroke=BLUE, strokeWidth=2, point=True).encode(
-                        x=alt.X("jour:T", title=None),
-                        y=alt.Y("observations:Q", title="Observations"),
-                        tooltip=[alt.Tooltip("jour:T", title="Jour"), alt.Tooltip("observations:Q", format=",", title="Passages")],
-                    ).properties(height=280)
-                    st.altair_chart(style_chart(line), use_container_width=True)
+                    now_ts = int(datetime.now().timestamp())
+                    ref_ts = max(last_ts, now_ts)
+                    preset_duration = {
+                        "Dernière heure": 3600,
+                        "Dernières 6 heures": 6 * 3600,
+                        "Dernières 24 heures": 24 * 3600,
+                        "Dernière semaine": 7 * 24 * 3600,
+                    }
+                    options = list(preset_duration.keys()) + ["Personnalisé"]
+                    selected = st.selectbox("Période", options, index=2, label_visibility="collapsed")
+
+                    if selected == "Personnalisé":
+                        col_a, col_b = st.columns(2)
+                        with col_a:
+                            d1 = st.date_input("Du", value=datetime.fromtimestamp(ref_ts - 86400).date())
+                        with col_b:
+                            d2 = st.date_input("Au", value=datetime.fromtimestamp(ref_ts).date())
+                        start_ts = int(datetime.combine(d1, datetime.min.time()).timestamp())
+                        end_ts = int(datetime.combine(d2, datetime.max.time()).timestamp())
+                    else:
+                        duration = preset_duration[selected]
+                        end_ts = ref_ts
+                        start_ts = end_ts - duration
+
+                    minutely = load_collection_minutely(conn, start_ts, end_ts)
+
+                    if minutely.empty:
+                        st.info("Aucune donnée pour cette période.")
+                    else:
+                        n_points = len(minutely)
+                        if n_points > 20000:
+                            st.caption(f"{n_points:,} points affichés — zoomez sur une période plus courte pour plus de précision.")
+
+                        line = alt.Chart(minutely).mark_line(stroke=BLUE, strokeWidth=1.5).encode(
+                            x=alt.X("minute:T", title=None),
+                            y=alt.Y("observations:Q", title="Observations",
+                                    scale=alt.Scale(zero=False)),
+                            tooltip=[alt.Tooltip("minute:T", title="Minute", format="%d/%m/%Y %H:%M"),
+                                     alt.Tooltip("observations:Q", format=",", title="Passages")],
+                        ).properties(height=280).interactive()
+                        st.altair_chart(style_chart(line), use_container_width=True)
             with right:
                 st.markdown("#### Répartition horaire")
                 hourly = stats["hourly"]
