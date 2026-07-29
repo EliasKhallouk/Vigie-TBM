@@ -10,13 +10,15 @@ import sqlite3
 import zipfile
 import io
 import csv
+from pathlib import Path
 import requests
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 GTFS_STATIC_URL = (
     "https://bdx.mecatran.com/utw/ws/gtfsfeed/static/bordeaux"
     "?apiKey=opendata-bordeaux-metropole-flux-gtfs-rt"
 )
-DB_PATH = "data/vigie_tbm.db"
+DB_PATH = str(PROJECT_ROOT / "data" / "vigie_tbm.db")
 
 
 def download_gtfs_zip(url: str) -> zipfile.ZipFile:

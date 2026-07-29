@@ -8,9 +8,10 @@ est sorti du flux temps réel, donc le retard enregistré est définitif).
 import sqlite3
 import time
 from datetime import date
+from pathlib import Path
 import pandas as pd
 
-DB_PATH = "data/vigie_tbm.db"
+DB_PATH = Path(__file__).resolve().parents[1] / "data" / "vigie_tbm.db"
 FRESHNESS_BUFFER_SECONDS = 20 * 60  # 20 minutes
 
 
