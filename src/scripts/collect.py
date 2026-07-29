@@ -14,7 +14,7 @@ from pathlib import Path
 import requests
 from google.transit import gtfs_realtime_pb2
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 URL_TRIPUPDATES = (
     "https://bdx.mecatran.com/utw/ws/gtfsfeed/realtime/bordeaux"
     "?apiKey=opendata-bordeaux-metropole-flux-gtfs-rt"

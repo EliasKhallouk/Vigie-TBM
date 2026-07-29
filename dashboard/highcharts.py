@@ -191,12 +191,10 @@ def collection_minutely_chart(df: pd.DataFrame) -> dict:
             "type": "line",
             "name": "Observations",
             "data": data,
-            "zoneAxis": "y",
-            "zones": [
-                {"value": 0.5, "color": "#ff4444", "marker": {"enabled": True, "fillColor": "#ff4444", "radius": 2}},
-                {"value": None, "color": BLUE},
-            ],
-            "marker": {"enabled": False, "states": {"hover": {"enabled": True, "radius": 3}}},
+            "color": BLUE,
+            "marker": {
+                "enabled": False
+            }
         }],
         "yAxis": {"title": {"text": "Observations"}, "min": 0},
     }

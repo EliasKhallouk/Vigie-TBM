@@ -354,6 +354,9 @@ def main() -> None:
                     if minutely.empty:
                         st.info("Aucune donnée pour cette période.")
                     else:
+                        #st.write(minutely.head(10))
+                        #st.write(minutely.dtypes)
+                        #st.write(minutely["observations"].max())
                         hc_render(collection_minutely_chart(minutely), height=340, use_stock=True)
             with right:
                 st.markdown("#### Répartition horaire")
