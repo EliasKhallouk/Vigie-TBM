@@ -166,6 +166,40 @@ def load_distribution(conn: sqlite3.Connection, cutoff_ts: int, route_id: str) -
     return bucket.value_counts(sort=False).rename_axis("plage").reset_index(name="observations")
 
 
+def load_collection_stats(conn: sqlite3.Connection) -> dict:
+    daily = pd.read_sql_query(
+        """
+        SELECT date(datetime(last_seen_at, 'unixepoch', 'localtime')) AS jour,
+               COUNT(*) AS observations,
+               COUNT(DISTINCT trip_id || start_date) AS trajets,
+               MIN(last_seen_at) AS premiere_seen,
+               MAX(last_seen_at) AS derniere_seen
+        FROM observations
+        GROUP BY jour ORDER BY jour
+        """, conn,
+    )
+    if not daily.empty:
+        daily["jour"] = pd.to_datetime(daily["jour"])
+    hourly = pd.read_sql_query(
+        """
+        SELECT CAST(strftime('%H', datetime(last_seen_at, 'unixepoch', 'localtime')) AS INTEGER) AS heure,
+               COUNT(*) AS observations
+        FROM observations
+        GROUP BY heure ORDER BY heure
+        """, conn,
+    )
+    first = conn.execute("SELECT MIN(last_seen_at) FROM observations").fetchone()[0]
+    last = conn.execute("SELECT MAX(last_seen_at) FROM observations").fetchone()[0]
+    total = conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
+    n_trajets = conn.execute("SELECT COUNT(DISTINCT trip_id || start_date) FROM observations").fetchone()[0]
+    n_lignes = conn.execute("SELECT COUNT(DISTINCT route_id) FROM observations").fetchone()[0]
+    return {
+        "daily": daily, "hourly": hourly,
+        "first_ts": first, "last_ts": last,
+        "total": total, "trajets": n_trajets, "lignes": n_lignes,
+    }
+
+
 def style_chart(chart: alt.Chart | alt.LayerChart) -> alt.Chart | alt.LayerChart:
     """Apply the common dark theme after a chart is fully assembled."""
     return chart.configure_view(strokeOpacity=0).configure_axis(
@@ -217,7 +251,7 @@ def main() -> None:
         metrics[3].metric("Lignes suivies", f"{len(ranking)}")
         metrics[4].metric("Arrêts sautés", f"{skip_rate:.2f} %", f"{skipped_total:,}".replace(",", " "))
 
-        tab_overview, tab_line, tab_method = st.tabs(["Vue réseau", "Analyse d'une ligne", "Méthode & données"])
+        tab_overview, tab_line, tab_collecte, tab_method = st.tabs(["Vue réseau", "Analyse d'une ligne", "Collecte des données", "Méthode & données"])
         with tab_overview:
             st.markdown("### Priorités de fiabilité")
             st.markdown('<div class="section-note">Le score combine ponctualité (≤ 5 min) et passages signalés comme sautés. Plus il est bas, plus la ligne mérite une attention.</div>', unsafe_allow_html=True)
@@ -263,7 +297,7 @@ def main() -> None:
                 if timeline.empty or len(timeline) < 2:
                     st.info("L'évolution apparaîtra dès que plusieurs jours de données seront disponibles.")
                 else:
-                    trend = alt.Chart(timeline).mark_area(line={"color": BLUE, "strokeWidth": 2}, color=alt.Gradient("linear", stops=[alt.GradientStop(color=BLUE, offset=0, opacity=.38), alt.GradientStop(color=BLUE, offset=1, opacity=0)])).encode(x=alt.X("date_service:T", title=None), y=alt.Y("pct_retard_5min:Q", title="Retards > 5 min (%)", scale=alt.Scale(zero=True)), tooltip=[alt.Tooltip("date_service:T", title="Date"), alt.Tooltip("pct_retard_5min:Q", format=".1f", title="> 5 min"), alt.Tooltip("observations:Q", format=",", title="Passages")]).properties(height=285)
+                    trend = alt.Chart(timeline).mark_area(line={"color": BLUE, "strokeWidth": 2}, color=BLUE, opacity=.12).encode(x=alt.X("date_service:T", title=None), y=alt.Y("pct_retard_5min:Q", title="Retards > 5 min (%)", scale=alt.Scale(zero=True)), tooltip=[alt.Tooltip("date_service:T", title="Date"), alt.Tooltip("pct_retard_5min:Q", format=".1f", title="> 5 min"), alt.Tooltip("observations:Q", format=",", title="Passages")]).properties(height=285)
                     st.altair_chart(style_chart(trend), use_container_width=True)
             with right:
                 st.markdown("#### Risque selon l'heure")
@@ -277,6 +311,42 @@ def main() -> None:
             if not distribution.empty:
                 dist = alt.Chart(distribution).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(x=alt.X("plage:N", title="Écart à l'horaire théorique", sort=None, axis=alt.Axis(labelAngle=-35)), y=alt.Y("observations:Q", title="Nombre de passages"), color=alt.condition("datum.plage === '0 à +1' || datum.plage === '+1 à +2' || datum.plage === '+2 à +5'", alt.value(MINT), alt.value(AMBER)), tooltip=[alt.Tooltip("plage:N", title="Écart"), alt.Tooltip("observations:Q", title="Passages", format=",")]).properties(height=280)
                 st.altair_chart(style_chart(dist), use_container_width=True)
+
+        with tab_collecte:
+            stats = load_collection_stats(conn)
+            st.markdown("### Suivi de la collecte")
+            st.markdown('<div class="section-note">Volume et continuité des données collectées via les flux GTFS-RT TripUpdates.</div>', unsafe_allow_html=True)
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Observations", f"{stats['total']:,}".replace(",", " "))
+            c2.metric("Trajets distincts", f"{stats['trajets']:,}".replace(",", " "))
+            c3.metric("Lignes suivies", str(stats["lignes"]))
+            c4.metric("Première date", format_date(stats["first_ts"]))
+            c5.metric("Dernière date", format_date(stats["last_ts"]))
+            left, right = st.columns(2, gap="large")
+            with left:
+                st.markdown("#### Observations par jour")
+                daily = stats["daily"]
+                if daily.empty or len(daily) < 1:
+                    st.info("Aucune donnée quotidienne.")
+                else:
+                    line = alt.Chart(daily).mark_line(stroke=BLUE, strokeWidth=2, point=True).encode(
+                        x=alt.X("jour:T", title=None),
+                        y=alt.Y("observations:Q", title="Observations"),
+                        tooltip=[alt.Tooltip("jour:T", title="Jour"), alt.Tooltip("observations:Q", format=",", title="Passages")],
+                    ).properties(height=280)
+                    st.altair_chart(style_chart(line), use_container_width=True)
+            with right:
+                st.markdown("#### Répartition horaire")
+                hourly = stats["hourly"]
+                if hourly.empty:
+                    st.info("Aucune donnée horaire.")
+                else:
+                    bars = alt.Chart(hourly).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
+                        x=alt.X("heure:O", title="Heure locale"),
+                        y=alt.Y("observations:Q", title="Observations"),
+                        tooltip=[alt.Tooltip("heure:O", title="Heure"), alt.Tooltip("observations:Q", format=",", title="Passages")],
+                    ).properties(height=280)
+                    st.altair_chart(style_chart(bars), use_container_width=True)
 
         with tab_method:
             st.markdown("### Ce que mesure ce tableau de bord")
