@@ -5,3 +5,4 @@ __pycache__/
 reports/output/
 reports/recipients.json
 coll
+data/collect.log

@@ -2877,3 +2877,6 @@ sqlite3.OperationalError: no such table: trip_status
 2026-07-29 21:02:45,342 [INFO] OK - 699 entités, 19569 observations mises à jour (feed ts=1785351749)
 2026-07-29 21:03:45,313 [INFO] OK - 696 entités, 19467 observations mises à jour (feed ts=1785351809)
 2026-07-29 21:04:45,357 [INFO] OK - 690 entités, 19397 observations mises à jour (feed ts=1785351869)
+2026-07-29 21:05:45,324 [INFO] OK - 687 entités, 19257 observations mises à jour (feed ts=1785351929)
+2026-07-29 21:06:45,363 [INFO] OK - 686 entités, 19125 observations mises à jour (feed ts=1785351989)
+2026-07-29 21:07:45,306 [INFO] OK - 684 entités, 19044 observations mises à jour (feed ts=1785352049)

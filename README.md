@@ -33,4 +33,9 @@ ubuntu@ek-hub-vnic:~$ cd Vigie-TBM/
 ubuntu@ek-hub-vnic:~/Vigie-TBM$ tail -f data/collect.log
 
 #### LANCER LE DASHBOARD
-(.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ .venv/bin/streamlit run dashboard/app.py
+(.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ sudo systemctl daemon-reload
+(.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ sudo systemctl enable vigie-tbm-dashboard.service
+(.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ sudo systemctl start vigie-tbm-dashboard.service
+(.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ sudo systemctl status vigie-tbm-dashboard.service 
+
+//avant :(.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ .venv/bin/streamlit run dashboard/app.py
