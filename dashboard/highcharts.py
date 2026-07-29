@@ -85,21 +85,30 @@ def ranking_chart(df: pd.DataFrame) -> dict:
 
 
 def scatter_chart(df: pd.DataFrame) -> dict:
-    data = []
+    series_data = {
+        "Peu d'arrêts sautés (< 5 %)": {"color": MINT, "data": []},
+        "Arrêts sautés modérés (5-15 %)": {"color": AMBER, "data": []},
+        "Nombreux arrêts sautés (> 15 %)": {"color": CORAL, "data": []},
+    }
     for _, r in df.iterrows():
         skipped = r.get("pct_arrets_sautes", 0)
-        color = MINT if skipped < 5 else (AMBER if skipped < 15 else CORAL)
-        data.append({"x": round(r["retard_moyen_s"], 1), "y": round(r["pct_retard_5min"], 1), "z": max(r["observations"], 1), "name": r["ligne"], "color": color, "pct_arrets_sautes": round(skipped, 2)})
+        cat = "Peu d'arrêts sautés (< 5 %)" if skipped < 5 else ("Arrêts sautés modérés (5-15 %)" if skipped < 15 else "Nombreux arrêts sautés (> 15 %)")
+        series_data[cat]["data"].append({
+            "x": round(r["retard_moyen_s"], 1), "y": round(r["pct_retard_5min"], 1),
+            "z": max(r["observations"], 1), "name": r["ligne"],
+            "pct_arrets_sautes": round(skipped, 2),
+        })
+    series = [{"type": "bubble", "name": name, "data": d["data"], "color": d["color"],
+               "tooltip": {"pointFormat": "<b>{point.name}</b><br/>Retard moyen: {point.x:.0f}s<br/>> 5 min: {point.y:.1f}%<br/>Arrêts sautés: {point.pct_arrets_sautes:.2f}%<br/>Passages: {point.z:,}"}}
+              for name, d in series_data.items() if d["data"]]
     return {
         "chart": {"type": "bubble", "height": 390},
         "title": {"text": None},
         "xAxis": {"title": {"text": "Retard moyen (secondes)"}},
         "yAxis": {"title": {"text": "Retards > 5 min (%)"}},
-        "series": [{
-            "name": "Lignes", "data": data,
-            "tooltip": {"pointFormat": "<b>{point.name}</b><br/>Retard moyen: {point.x:.0f}s<br/>> 5 min: {point.y:.1f}%<br/>Arrêts sautés: {point.pct_arrets_sautes:.2f}%<br/>Passages: {point.z:,}"},
-        }],
+        "series": series,
         "plotOptions": {"bubble": {"minSize": 10, "maxSize": 60, "opacity": 0.82}},
+        "legend": {"enabled": True, "verticalAlign": "bottom", "align": "center"},
     }
 
 
@@ -182,20 +191,6 @@ def collection_minutely_chart(df: pd.DataFrame) -> dict:
             "type": "line",
             "name": "Observations",
             "data": data,
-            "dataGrouping": {
-                "enabled": True,
-                "forced": False,
-                "units": [
-                    ["minute", [1, 5, 15, 30]],
-                    ["hour", [1, 2, 4, 8, 12]],
-                    ["day", [1]],
-                ],
-                "dateTimeLabelFormats": {
-                    "minute": "%H:%M",
-                    "hour": "%H:%M",
-                    "day": "%d/%m",
-                },
-            },
             "gapSize": 5,
             "marker": {"enabled": False, "states": {"hover": {"enabled": True, "radius": 3}}},
         }],

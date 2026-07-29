@@ -343,10 +343,10 @@ def main() -> None:
                         with col_b:
                             d2 = st.date_input("Au", value=datetime.fromtimestamp(ref_ts).date())
                         start_ts = int(datetime.combine(d1, datetime.min.time()).timestamp())
-                        end_ts = int(datetime.combine(d2, datetime.max.time()).timestamp())
+                        end_ts = int(datetime.combine(d2, datetime.max.time()).timestamp()) - 60
                     else:
                         duration = preset_duration[selected]
-                        end_ts = ref_ts
+                        end_ts = ref_ts - 60
                         start_ts = end_ts - duration
 
                     minutely = load_collection_minutely(conn, start_ts, end_ts)
