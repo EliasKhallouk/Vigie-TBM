@@ -1,0 +1,5 @@
+# dépendances système (apt)
+texlive-latex-base
+texlive-latex-recommended
+texlive-latex-extra
+texlive-lang-french
