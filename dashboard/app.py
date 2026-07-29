@@ -215,7 +215,7 @@ def load_collection_minutely(_conn, start_ts, end_ts):
     debut = datetime.fromtimestamp(start_ts).replace(second=0, microsecond=0)
     fin = datetime.fromtimestamp(end_ts).replace(second=0, microsecond=0)
     idx = pd.date_range(start=debut, end=fin, freq="min")
-    df = df.set_index("minute").reindex(idx).rename_axis("minute").reset_index()
+    df = df.set_index("minute").reindex(idx).fillna(0).rename_axis("minute").reset_index()
     return df
 
 

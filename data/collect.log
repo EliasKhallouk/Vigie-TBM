@@ -2739,3 +2739,73 @@ sqlite3.OperationalError: no such table: collection_gaps
 2026-07-29 12:15:33,945 [INFO] OK - 1572 entités, 40829 observations mises à jour (feed ts=1785320129)
 2026-07-29 12:16:33,950 [INFO] OK - 1567 entités, 40685 observations mises à jour (feed ts=1785320189)
 2026-07-29 12:17:33,888 [INFO] OK - 1571 entités, 41202 observations mises à jour (feed ts=1785320249)
+2026-07-29 18:51:49,150 [INFO] Démarrage de la collecte Vigie TBM (intervalle: 60s)
+2026-07-29 18:51:49,380 [ERROR] Erreur inattendue pendant le traitement : no such table: trip_status
+Traceback (most recent call last):
+  File "/home/ubuntu/Vigie-TBM/src/collect.py", line 154, in main
+    n_rows = process_feed(conn, feed)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/Vigie-TBM/src/collect.py", line 93, in process_feed
+    log_trip_status(conn, trip_id, start_date, route_id, trip_schedule_relationship, feed_timestamp)
+  File "/home/ubuntu/Vigie-TBM/src/collect.py", line 66, in log_trip_status
+    conn.execute("""
+sqlite3.OperationalError: no such table: trip_status
+2026-07-29 18:52:49,474 [ERROR] Erreur inattendue pendant le traitement : no such table: trip_status
+Traceback (most recent call last):
+  File "/home/ubuntu/Vigie-TBM/src/collect.py", line 154, in main
+    n_rows = process_feed(conn, feed)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/Vigie-TBM/src/collect.py", line 93, in process_feed
+    log_trip_status(conn, trip_id, start_date, route_id, trip_schedule_relationship, feed_timestamp)
+  File "/home/ubuntu/Vigie-TBM/src/collect.py", line 66, in log_trip_status
+    conn.execute("""
+sqlite3.OperationalError: no such table: trip_status
+2026-07-29 18:53:49,370 [ERROR] Erreur inattendue pendant le traitement : no such table: trip_status
+Traceback (most recent call last):
+  File "/home/ubuntu/Vigie-TBM/src/collect.py", line 154, in main
+    n_rows = process_feed(conn, feed)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/Vigie-TBM/src/collect.py", line 93, in process_feed
+    log_trip_status(conn, trip_id, start_date, route_id, trip_schedule_relationship, feed_timestamp)
+  File "/home/ubuntu/Vigie-TBM/src/collect.py", line 66, in log_trip_status
+    conn.execute("""
+sqlite3.OperationalError: no such table: trip_status
+2026-07-29 18:54:49,474 [ERROR] Erreur inattendue pendant le traitement : no such table: trip_status
+Traceback (most recent call last):
+  File "/home/ubuntu/Vigie-TBM/src/collect.py", line 154, in main
+    n_rows = process_feed(conn, feed)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/Vigie-TBM/src/collect.py", line 93, in process_feed
+    log_trip_status(conn, trip_id, start_date, route_id, trip_schedule_relationship, feed_timestamp)
+  File "/home/ubuntu/Vigie-TBM/src/collect.py", line 66, in log_trip_status
+    conn.execute("""
+sqlite3.OperationalError: no such table: trip_status
+2026-07-29 18:55:49,455 [ERROR] Erreur inattendue pendant le traitement : no such table: trip_status
+Traceback (most recent call last):
+  File "/home/ubuntu/Vigie-TBM/src/collect.py", line 154, in main
+    n_rows = process_feed(conn, feed)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/Vigie-TBM/src/collect.py", line 93, in process_feed
+    log_trip_status(conn, trip_id, start_date, route_id, trip_schedule_relationship, feed_timestamp)
+  File "/home/ubuntu/Vigie-TBM/src/collect.py", line 66, in log_trip_status
+    conn.execute("""
+sqlite3.OperationalError: no such table: trip_status
+2026-07-29 18:56:49,790 [INFO] OK - 1171 entités, 29528 observations mises à jour (feed ts=1785344209)
+2026-07-29 18:57:49,700 [INFO] OK - 1167 entités, 29430 observations mises à jour (feed ts=1785344249)
+2026-07-29 18:58:49,754 [INFO] OK - 1162 entités, 29339 observations mises à jour (feed ts=1785344329)
+2026-07-29 18:59:49,794 [INFO] OK - 1156 entités, 29238 observations mises à jour (feed ts=1785344389)
+2026-07-29 19:05:18,534 [INFO] Démarrage de la collecte Vigie TBM (intervalle: 60s)
+2026-07-29 19:05:18,858 [WARNING] Trou de collecte détecté : 5 minutes
+2026-07-29 19:05:19,177 [INFO] OK - 1138 entités, 28956 observations mises à jour (feed ts=1785344710)
+2026-07-29 19:06:19,124 [INFO] OK - 1142 entités, 28903 observations mises à jour (feed ts=1785344770)
+2026-07-29 19:07:19,081 [INFO] OK - 1141 entités, 28939 observations mises à jour (feed ts=1785344830)
+2026-07-29 19:08:19,141 [INFO] OK - 1138 entités, 28928 observations mises à jour (feed ts=1785344889)
+2026-07-29 19:09:19,100 [INFO] OK - 1126 entités, 28664 observations mises à jour (feed ts=1785344950)
+2026-07-29 19:10:19,143 [INFO] OK - 1121 entités, 28454 observations mises à jour (feed ts=1785345010)
+2026-07-29 19:11:19,135 [INFO] OK - 1110 entités, 28379 observations mises à jour (feed ts=1785345070)
+2026-07-29 19:12:19,123 [INFO] OK - 1110 entités, 28417 observations mises à jour (feed ts=1785345130)
+2026-07-29 19:13:19,107 [INFO] OK - 1096 entités, 28288 observations mises à jour (feed ts=1785345189)
+2026-07-29 19:14:19,046 [INFO] OK - 1093 entités, 28309 observations mises à jour (feed ts=1785345250)
+2026-07-29 19:15:19,049 [INFO] OK - 1087 entités, 28148 observations mises à jour (feed ts=1785345310)
+2026-07-29 19:16:19,159 [INFO] OK - 1087 entités, 28124 observations mises à jour (feed ts=1785345370)
+2026-07-29 19:17:19,122 [INFO] OK - 1087 entités, 28088 observations mises à jour (feed ts=1785345430)

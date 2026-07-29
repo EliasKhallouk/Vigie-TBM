@@ -157,7 +157,7 @@ def delay_distribution_chart(df: pd.DataFrame) -> dict:
 
 
 def collection_minutely_chart(df: pd.DataFrame) -> dict:
-    data = [[int(pd.Timestamp(r["minute"]).timestamp() * 1000), int(r["observations"])] for _, r in df.iterrows() if pd.notna(r["observations"])]
+    data = [[int(pd.Timestamp(r["minute"]).timestamp() * 1000), int(r["observations"])] for _, r in df.iterrows()]
     return {
         "chart": {"zoomType": "x"},
         "rangeSelector": {
@@ -191,7 +191,11 @@ def collection_minutely_chart(df: pd.DataFrame) -> dict:
             "type": "line",
             "name": "Observations",
             "data": data,
-            "gapSize": 5,
+            "zoneAxis": "y",
+            "zones": [
+                {"value": 0.5, "color": "#ff4444", "marker": {"enabled": True, "fillColor": "#ff4444", "radius": 2}},
+                {"value": None, "color": BLUE},
+            ],
             "marker": {"enabled": False, "states": {"hover": {"enabled": True, "radius": 3}}},
         }],
         "yAxis": {"title": {"text": "Observations"}, "min": 0},
