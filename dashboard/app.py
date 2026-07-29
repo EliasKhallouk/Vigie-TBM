@@ -8,20 +8,27 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+from highcharts import (
+    render as hc_render,
+    ranking_chart,
+    scatter_chart,
+    timeline_chart,
+    hourly_risk_chart,
+    delay_distribution_chart,
+    collection_minutely_chart,
+    hourly_distribution_chart,
+)
 
 DB_PATH = Path(__file__).resolve().parents[1] / "data" / "vigie_tbm.db"
 FRESHNESS_BUFFER_SECONDS = 20 * 60
 MIN_OBSERVATIONS_DEFAULT = 100
 NAVY = "#07162f"
-PANEL = "#0c2145"
 BLUE = "#37a5ff"
 MINT = "#35d0aa"
-AMBER = "#f8b84e"
-CORAL = "#fb7185"
 MUTED = "#9bb1d1"
 
 
@@ -167,19 +174,6 @@ def load_distribution(conn: sqlite3.Connection, cutoff_ts: int, route_id: str) -
 
 
 def load_collection_stats(conn: sqlite3.Connection) -> dict:
-    daily = pd.read_sql_query(
-        """
-        SELECT date(datetime(last_seen_at, 'unixepoch', 'localtime')) AS jour,
-               COUNT(*) AS observations,
-               COUNT(DISTINCT trip_id || start_date) AS trajets,
-               MIN(last_seen_at) AS premiere_seen,
-               MAX(last_seen_at) AS derniere_seen
-        FROM observations
-        GROUP BY jour ORDER BY jour
-        """, conn,
-    )
-    if not daily.empty:
-        daily["jour"] = pd.to_datetime(daily["jour"])
     hourly = pd.read_sql_query(
         """
         SELECT CAST(strftime('%H', datetime(last_seen_at, 'unixepoch', 'localtime')) AS INTEGER) AS heure,
@@ -194,7 +188,7 @@ def load_collection_stats(conn: sqlite3.Connection) -> dict:
     n_trajets = conn.execute("SELECT COUNT(DISTINCT trip_id || start_date) FROM observations").fetchone()[0]
     n_lignes = conn.execute("SELECT COUNT(DISTINCT route_id) FROM observations").fetchone()[0]
     return {
-        "daily": daily, "hourly": hourly,
+        "hourly": hourly,
         "first_ts": first, "last_ts": last,
         "total": total, "trajets": n_trajets, "lignes": n_lignes,
     }
@@ -223,13 +217,6 @@ def load_collection_minutely(_conn, start_ts, end_ts):
     idx = pd.date_range(start=debut, end=fin, freq="min")
     df = df.set_index("minute").reindex(idx).rename_axis("minute").reset_index()
     return df
-
-
-def style_chart(chart: alt.Chart | alt.LayerChart) -> alt.Chart | alt.LayerChart:
-    """Apply the common dark theme after a chart is fully assembled."""
-    return chart.configure_view(strokeOpacity=0).configure_axis(
-        labelColor="#b7c8e5", titleColor="#b7c8e5", domainColor="#31527f", tickColor="#31527f", gridColor="#19385f"
-    ).configure_legend(labelColor="#dce8fa", titleColor="#dce8fa")
 
 
 def main() -> None:
@@ -283,22 +270,9 @@ def main() -> None:
             left, right = st.columns([1.05, .95], gap="large")
             with left:
                 chart_data = visible_ranking.head(15).sort_values("score_fiabilite")
-                bars = alt.Chart(chart_data).mark_bar(cornerRadiusEnd=4).encode(
-                    x=alt.X("score_fiabilite:Q", title="Score de fiabilité / 100", scale=alt.Scale(domain=[0, 100])),
-                    y=alt.Y("ligne:N", title=None, sort="x"),
-                    color=alt.condition(alt.datum.score_fiabilite < 75, alt.value(CORAL), alt.value(BLUE)),
-                    tooltip=[alt.Tooltip("ligne:N", title="Ligne"), alt.Tooltip("score_fiabilite:Q", title="Score", format=".1f"), alt.Tooltip("pct_a_l_heure:Q", title="À l'heure", format=".1f"), alt.Tooltip("pct_arrets_sautes:Q", title="Arrêts sautés", format=".2f"), alt.Tooltip("observations:Q", title="Passages", format=",")],
-                ).properties(height=390)
-                st.altair_chart(style_chart(bars), use_container_width=True)
+                hc_render(ranking_chart(chart_data), height=390)
             with right:
-                scatter = alt.Chart(visible_ranking).mark_circle(opacity=.82).encode(
-                    x=alt.X("retard_moyen_s:Q", title="Retard moyen (secondes)"),
-                    y=alt.Y("pct_retard_5min:Q", title="Retards > 5 min (%)"),
-                    size=alt.Size("observations:Q", title="Passages", scale=alt.Scale(range=[45, 850])),
-                    color=alt.Color("pct_arrets_sautes:Q", title="Arrêts sautés (%)", scale=alt.Scale(range=["#36d0ad", "#f8b84e", "#fb7185"])),
-                    tooltip=[alt.Tooltip("ligne:N", title="Ligne"), alt.Tooltip("retard_moyen_s:Q", title="Retard moyen", format=".0f"), alt.Tooltip("pct_retard_5min:Q", title="> 5 min", format=".1f"), alt.Tooltip("observations:Q", title="Passages", format=",")],
-                ).interactive().properties(height=390)
-                st.altair_chart(style_chart(scatter), use_container_width=True)
+                hc_render(scatter_chart(visible_ranking), height=390)
             worst = ranking.iloc[0]
             st.markdown(f'<div class="insight">À surveiller en premier : <b>ligne {worst.ligne}</b> — score de fiabilité {worst.score_fiabilite:.1f}/100, avec {worst.pct_retard_5min:.1f} % de passages au-delà de 5 minutes.</div>', unsafe_allow_html=True)
             st.markdown("#### Détail des lignes")
@@ -322,20 +296,17 @@ def main() -> None:
                 if timeline.empty or len(timeline) < 2:
                     st.info("L'évolution apparaîtra dès que plusieurs jours de données seront disponibles.")
                 else:
-                    trend = alt.Chart(timeline).mark_area(line={"color": BLUE, "strokeWidth": 2}, color=BLUE, opacity=.12).encode(x=alt.X("date_service:T", title=None), y=alt.Y("pct_retard_5min:Q", title="Retards > 5 min (%)", scale=alt.Scale(zero=True)), tooltip=[alt.Tooltip("date_service:T", title="Date"), alt.Tooltip("pct_retard_5min:Q", format=".1f", title="> 5 min"), alt.Tooltip("observations:Q", format=",", title="Passages")]).properties(height=285)
-                    st.altair_chart(style_chart(trend), use_container_width=True)
+                    hc_render(timeline_chart(timeline), height=285)
             with right:
                 st.markdown("#### Risque selon l'heure")
                 if hourly.empty:
                     st.info("Cette vue nécessite les heures de départ des observations.")
                 else:
-                    hours = alt.Chart(hourly).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(x=alt.X("heure:O", title="Heure locale"), y=alt.Y("pct_retard_5min:Q", title="Retards > 5 min (%)"), color=alt.condition(alt.datum.pct_retard_5min > delayed, alt.value(CORAL), alt.value(MINT)), tooltip=[alt.Tooltip("heure:O", title="Heure"), alt.Tooltip("pct_retard_5min:Q", title="> 5 min", format=".1f"), alt.Tooltip("retard_moyen_s:Q", title="Retard moyen", format=".0f"), alt.Tooltip("observations:Q", title="Passages", format=",")]).properties(height=285)
-                    st.altair_chart(style_chart(hours), use_container_width=True)
+                    hc_render(hourly_risk_chart(hourly, delayed), height=285)
             st.markdown("#### Profil des retards")
             distribution = load_distribution(conn, cutoff, selected_route_id)
             if not distribution.empty:
-                dist = alt.Chart(distribution).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(x=alt.X("plage:N", title="Écart à l'horaire théorique", sort=None, axis=alt.Axis(labelAngle=-35)), y=alt.Y("observations:Q", title="Nombre de passages"), color=alt.condition("datum.plage === '0 à +1' || datum.plage === '+1 à +2' || datum.plage === '+2 à +5'", alt.value(MINT), alt.value(AMBER)), tooltip=[alt.Tooltip("plage:N", title="Écart"), alt.Tooltip("observations:Q", title="Passages", format=",")]).properties(height=280)
-                st.altair_chart(style_chart(dist), use_container_width=True)
+                hc_render(delay_distribution_chart(distribution), height=280)
 
         with tab_collecte:
             stats = load_collection_stats(conn)
@@ -383,30 +354,14 @@ def main() -> None:
                     if minutely.empty:
                         st.info("Aucune donnée pour cette période.")
                     else:
-                        n_points = len(minutely)
-                        if n_points > 20000:
-                            st.caption(f"{n_points:,} points affichés — zoomez sur une période plus courte pour plus de précision.")
-
-                        line = alt.Chart(minutely).mark_line(stroke=BLUE, strokeWidth=1.5).encode(
-                            x=alt.X("minute:T", title=None),
-                            y=alt.Y("observations:Q", title="Observations",
-                                    scale=alt.Scale(zero=False)),
-                            tooltip=[alt.Tooltip("minute:T", title="Minute", format="%d/%m/%Y %H:%M"),
-                                     alt.Tooltip("observations:Q", format=",", title="Passages")],
-                        ).properties(height=280).interactive()
-                        st.altair_chart(style_chart(line), use_container_width=True)
+                        hc_render(collection_minutely_chart(minutely), height=340, use_stock=True)
             with right:
                 st.markdown("#### Répartition horaire")
                 hourly = stats["hourly"]
                 if hourly.empty:
                     st.info("Aucune donnée horaire.")
                 else:
-                    bars = alt.Chart(hourly).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
-                        x=alt.X("heure:O", title="Heure locale"),
-                        y=alt.Y("observations:Q", title="Observations"),
-                        tooltip=[alt.Tooltip("heure:O", title="Heure"), alt.Tooltip("observations:Q", format=",", title="Passages")],
-                    ).properties(height=280)
-                    st.altair_chart(style_chart(bars), use_container_width=True)
+                    hc_render(hourly_distribution_chart(hourly), height=280)
 
         with tab_method:
             st.markdown("### Ce que mesure ce tableau de bord")
