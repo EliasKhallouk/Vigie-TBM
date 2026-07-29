@@ -34,29 +34,18 @@ CREATE TABLE IF NOT EXISTS daily_line_stats (
 CREATE TABLE IF NOT EXISTS collection_gaps (
     gap_start INTEGER NOT NULL,
     gap_end INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS trip_status (
+    trip_id TEXT NOT NULL,
+    start_date TEXT NOT NULL,
+    route_id TEXT NOT NULL,
+    schedule_relationship TEXT NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    PRIMARY KEY (trip_id, start_date)
 )
 """)
 conn.commit()
-
-def upsert_observation(conn, trip_id, start_date, route_id, direction_id,
-                        stop_sequence, stop_id, schedule_relationship,
-                        arrival_delay, departure_delay, departure_time,
-                        feed_timestamp):
-    conn.execute("""
-        INSERT INTO observations
-            (trip_id, start_date, route_id, direction_id, stop_sequence,
-             stop_id, schedule_relationship, arrival_delay, departure_delay,
-             departure_time, last_seen_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(trip_id, start_date, stop_sequence) DO UPDATE SET
-            schedule_relationship = excluded.schedule_relationship,
-            arrival_delay = excluded.arrival_delay,
-            departure_delay = excluded.departure_delay,
-            departure_time = excluded.departure_time,
-            last_seen_at = excluded.last_seen_at
-    """, (trip_id, start_date, route_id, direction_id, stop_sequence,
-          stop_id, schedule_relationship, arrival_delay, departure_delay,
-          departure_time, feed_timestamp))
 
 
 columns = {

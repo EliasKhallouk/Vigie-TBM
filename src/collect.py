@@ -62,6 +62,16 @@ def upsert_observation(conn, trip_id, start_date, route_id, direction_id,
           departure_time, feed_timestamp))
 
 
+def log_trip_status(conn, trip_id, start_date, route_id, trip_schedule_relationship, feed_timestamp):
+    conn.execute("""
+        INSERT INTO trip_status (trip_id, start_date, route_id, schedule_relationship, last_seen_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(trip_id, start_date) DO UPDATE SET
+            schedule_relationship = excluded.schedule_relationship,
+            last_seen_at = excluded.last_seen_at
+    """, (trip_id, start_date, route_id, trip_schedule_relationship, feed_timestamp))
+
+
 def process_feed(conn, feed: gtfs_realtime_pb2.FeedMessage) -> int:
     feed_timestamp = feed.header.timestamp
     n_rows = 0
@@ -76,6 +86,11 @@ def process_feed(conn, feed: gtfs_realtime_pb2.FeedMessage) -> int:
         start_date = tu.trip.start_date
         route_id = tu.trip.route_id
         direction_id = tu.trip.direction_id
+        trip_schedule_relationship = gtfs_realtime_pb2.TripDescriptor.ScheduleRelationship.Name(
+            tu.trip.schedule_relationship
+        )
+
+        log_trip_status(conn, trip_id, start_date, route_id, trip_schedule_relationship, feed_timestamp)
 
         for stu in tu.stop_time_update:
             schedule_relationship = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.ScheduleRelationship.Name(
@@ -122,6 +137,7 @@ def get_last_known_success(conn):
 
 def main():
     conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL;")    
     logger.info("Démarrage de la collecte Vigie TBM (intervalle: %ss)", POLL_INTERVAL_SECONDS)
 
     last_success_ts = get_last_known_success(conn)
