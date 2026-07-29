@@ -9,15 +9,17 @@ import sqlite3
 import time
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
 import requests
 from google.transit import gtfs_realtime_pb2
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 URL_TRIPUPDATES = (
     "https://bdx.mecatran.com/utw/ws/gtfsfeed/realtime/bordeaux"
     "?apiKey=opendata-bordeaux-metropole-flux-gtfs-rt"
 )
-DB_PATH = "data/vigie_tbm.db"
+DB_PATH = str(PROJECT_ROOT / "data" / "vigie_tbm.db")
 POLL_INTERVAL_SECONDS = 60
 GAP_THRESHOLD_SECONDS = 180  # 3x l'intervalle normal de 60s, marge de sécurité
 
@@ -26,7 +28,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("data/collect.log"),
+        logging.FileHandler(str(PROJECT_ROOT / "data" / "collect.log")),
         logging.StreamHandler(),
     ],
 )

@@ -17,7 +17,7 @@ ubuntu@ek-hub-vnic:~$ cd Vigie-TBM/
 (.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ source .venv/bin/activate
 
 #### CRÉER LA BDD
-(.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ python3 src/db.py
+(.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ python3 src/scripts/db.py
 
 #### POUR LANCER LE SCRIPTE DE COLLECT 
 (.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ sudo nano /etc/systemd/system/vigie-tbm-collect.service
