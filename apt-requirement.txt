@@ -6,3 +6,4 @@ texlive-lang-french
 texlive-xetex
 texlive-latex-extra
 texlive-fonts-recommended
+fonts-inter
