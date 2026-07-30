@@ -72,16 +72,19 @@ def duration(seconds: float | None, signed: bool = True) -> str:
 
 
 def kpi_color(metrics: dict, key: str) -> str:
-    """Return a LaTeX color name based on the metric value (good→green, medium→orange, bad→red)."""
+    """Return a LaTeX color name based on the metric value."""
+    if key == "fiability":
+        v = metrics[key]
+        return "vigiegreen" if v >= 90 else "vigieblue" if v >= 80 else "alert"
     if key == "ponctualite":
         v = metrics[key]
-        return "vigiegreen" if v >= 90 else "vigieorange" if v >= 80 else "alert"
+        return "vigiegreen" if v >= 90 else "vigieblue" if v >= 80 else "alert"
     if key in ("retard", "retard_median"):
         v = abs(metrics[key])
-        return "vigiegreen" if v <= 60 else "vigieorange" if v <= 120 else "alert"
+        return "vigiegreen" if v <= 60 else "vigieblue" if v <= 120 else "alert"
     if key == "skip_rate":
         v = metrics[key]
-        return "vigiegreen" if v <= 1 else "vigieorange" if v <= 5 else "alert"
+        return "vigiegreen" if v <= 1 else "vigieblue" if v <= 5 else "alert"
     return "vigieblue"
 
 
@@ -89,7 +92,7 @@ def net_val(network_metrics: dict | None, key: str, formatter) -> str:
     """Return a LaTeX snippet showing the network-wide comparison value, or empty."""
     if network_metrics is None:
         return ""
-    return f"\\\\ {{\\tiny\\color{{gray}}Réseau: {formatter(network_metrics[key])}}}"
+    return f" {{\\tiny\\color{{gray}}Réseau: {formatter(network_metrics[key])}}}"
 
 
 def safe_slug(value: str) -> str:
@@ -292,6 +295,31 @@ def query_monthly_evolution(conn: sqlite3.Connection, month: str, scope: Scope) 
     return df
 
 
+def query_collection_gaps(conn: sqlite3.Connection, month: str) -> dict:
+    """Return gap stats and total observations for the methodology section."""
+    gap_seconds = conn.execute(
+        "SELECT COALESCE(SUM(gap_end - gap_start), 0) FROM collection_gaps "
+
+        "WHERE strftime('%Y-%m', datetime(gap_start, 'unixepoch')) = ? "
+
+        "OR strftime('%Y-%m', datetime(gap_end, 'unixepoch')) = ?",
+
+        (month, month)
+    ).fetchone()[0] or 0
+
+    total_raw = conn.execute(
+        "SELECT COUNT(*) FROM observations o "
+
+        "LEFT JOIN routes r ON r.route_id = o.route_id "
+
+        "WHERE strftime('%Y-%m', datetime(o.departure_time, 'unixepoch', 'localtime')) = ?",
+
+        (month,)
+    ).fetchone()[0] or 0
+
+    return {"gap_seconds": int(gap_seconds), "total_raw": int(total_raw)}
+
+
 def make_line_stats(scheduled: pd.DataFrame, skipped: pd.DataFrame) -> pd.DataFrame:
     rows = scheduled.groupby(["route_id", "ligne"], as_index=False).agg(
         passages=("departure_delay", "size"),
@@ -317,13 +345,18 @@ def kpis(scheduled: pd.DataFrame, skipped: pd.DataFrame) -> dict[str, float | in
         "retard_5": (scheduled.departure_delay > 300).mean() * 100,
         "skipped": skipped_count,
         "skip_rate": skipped_count / eligible * 100 if eligible else 0,
+        "fiability": max(0.0, (scheduled.departure_delay <= 300).mean() * 100 - 2 * (skipped_count / eligible * 100 if eligible else 0)),
     }
 
 
 def comparison(current: dict[str, float | int], previous: dict[str, float | int] | None) -> dict[str, str]:
     if not previous:
-        return {"ponctualite": "Pas de comparaison", "retard": "Pas de comparaison", "skip_rate": "Pas de comparaison"}
+        return {"fiability": "Historique en cours de constitution — comparaison disponible dès le rapport du mois prochain.",
+                "ponctualite": "Historique en cours de constitution — comparaison disponible dès le rapport du mois prochain.",
+                "retard": "Historique en cours de constitution — comparaison disponible dès le rapport du mois prochain.",
+                "skip_rate": "Historique en cours de constitution — comparaison disponible dès le rapport du mois prochain."}
     return {
+        "fiability": f"{float(current['fiability']) - float(previous['fiability']):+.1f} pts vs mois précédent",
         "ponctualite": f"{float(current['ponctualite']) - float(previous['ponctualite']):+.1f} pts vs mois précédent",
         "retard": (
             f"moy. {float(current['retard']) - float(previous['retard']):+.0f} s ; "
@@ -607,14 +640,14 @@ def build_no_data_latex(month: str, scope: Scope, collected_at: str) -> str:
 \usepackage[french]{{babel}}
 \usepackage[margin=2cm]{{geometry}}
 \usepackage{{xcolor,fancyhdr}}
-\definecolor{{vigieblue}}{{HTML}}{{083B73}}
+\definecolor{{vigieblue}}{{HTML}}{{009EE3}}
 \pagestyle{{fancy}}\fancyhf{{}}\lhead{{\textcolor{{vigieblue}}{{VIGIE TBM}}}}\rhead{{Rapport mensuel}}\cfoot{{\thepage}}
 \begin{{document}}
 \begin{{center}}
 {{\LARGE\bfseries Rapport mensuel de fiabilité des transports TBM}}\\[5pt]
 {{\large {latex(report_month).capitalize()} — Destinataire : {latex(scope.recipient)}}}\\[3pt]
 \small Périmètre : {latex(scope.description)}\\[2pt]
-\small Rapport produit par KHALLOUK Elias
+\small Rapport produit par Elias Khallouk --- eliaskhallouk@gmail.com
 \end{{center}}
 \vspace{{1cm}}\hrule\vspace{{1cm}}
 \section*{{Absence de données exploitables}}
@@ -634,7 +667,8 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
                 network_metrics: dict | None = None,
                 network_lines: pd.DataFrame | None = None,
                 stop_stats: pd.DataFrame | None = None,
-                monthly_evolution: pd.DataFrame | None = None) -> str:
+                monthly_evolution: pd.DataFrame | None = None,
+                gaps: dict | None = None) -> str:
     report_date = datetime.strptime(month, "%Y-%m")
     report_month = f"{FRENCH_MONTHS[report_date.month - 1]} {report_date.year}"
     worst = lines.head(3)
@@ -647,6 +681,16 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
         net_total = len(ranked)
         net_rank = {row.route_id: idx + 1 for idx, row in ranked.iterrows()}
 
+    # Collection gaps info for methodology
+    if gaps and gaps["gap_seconds"] > 0:
+        gap_minutes = gaps["gap_seconds"] // 60
+        excluded = gaps["total_raw"] - int(metrics["passages"])
+        gap_line = f"{excluded} observations exclues sur {gaps['total_raw']} ({gap_minutes}~min d\'interruption de collecte)."
+    else:
+        gap_line = "Aucune interruption de collecte significative sur la période."
+    evolution_note = f"\textbf{{Évolution mensuelle.}} {change.get('fiability', '')}"
+
+
     alerts = "\n".join(
         f"\\item \\textbf{{Ligne {latex(row.ligne)}}}"
         + (f" (rang réseau : {net_rank.get(row.route_id, '—')}/{net_total})" if net_rank else "")
@@ -655,44 +699,48 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
     )
 
     return rf"""\documentclass[10pt,a4paper]{{article}}
-\usepackage[utf8]{{inputenc}}
-\usepackage[T1]{{fontenc}}
 \usepackage[french]{{babel}}
+\usepackage{{fontspec}}
+\setmainfont{{Lato}}
 \usepackage[margin=1.7cm]{{geometry}}
-\usepackage{{amsmath,booktabs,longtable,array,xcolor,tabularx,enumitem,pgfplots}}
+\usepackage{{amsmath,booktabs,longtable,array,xcolor,tabularx,enumitem,pgfplots,tcolorbox}}
 \usepackage{{fancyhdr}}
-\definecolor{{vigieblue}}{{HTML}}{{083B73}}
-\definecolor{{vigielight}}{{HTML}}{{EAF3FC}}
-\definecolor{{alert}}{{HTML}}{{A52A2A}}
-\definecolor{{vigiegreen}}{{HTML}}{{158C72}}
-\definecolor{{vigieorange}}{{HTML}}{{D38419}}
+\definecolor{{vigieblue}}{{HTML}}{{009EE3}}
+\definecolor{{vigielight}}{{HTML}}{{FFFFFF}}
+\definecolor{{alert}}{{HTML}}{{E7007C}}
+\definecolor{{vigiegreen}}{{HTML}}{{94C21E}}
+\definecolor{{vigieorange}}{{HTML}}{{009EE3}}
 \pgfplotsset{{compat=1.18}}
 \pagestyle{{fancy}}\fancyhf{{}}\lhead{{\textcolor{{vigieblue}}{{VIGIE TBM}}}}\rhead{{Rapport mensuel}}\cfoot{{\thepage}}
 \setlength{{\parindent}}{{0pt}}
-\newcommand{{\kpi}}[3][vigieblue]{{\begin{{minipage}}[t]{{.30\textwidth}}\raggedright\colorbox{{vigielight}}{{\parbox{{.91\textwidth}}{{\scriptsize #2\\[3pt]\textcolor{{#1}}{{\Large\bfseries #3}}}}}}\end{{minipage}}}}
+\newcommand{{\kpi}}[3][vigieblue]{{\begin{{tcolorbox}}[width=.28\textwidth,sharp corners,boxrule=0pt,leftrule=3pt,colback=vigielight,colframe=#1,arc=0pt,outer arc=0pt,left=6pt,right=4pt,top=4pt,bottom=4pt,halign=flush left,valign=top]{{\scriptsize #2\\[3pt]}}{{\Large\bfseries\color{{#1}} #3}}\end{{tcolorbox}}}}
+
 \begin{{document}}
 \begin{{center}}
 {{\LARGE\bfseries Rapport mensuel de fiabilité des transports TBM}}\\[5pt]
 {{\large {latex(report_month).capitalize()} — Destinataire : {latex(scope.recipient)}}}\\[3pt]
 \small Périmètre : {latex(scope.description)}\\[2pt]
-\small Rapport produit par KHALLOUK Elias
+\small Rapport produit par Elias Khallouk --- eliaskhallouk@gmail.com
 \end{{center}}
 \vspace{{.45cm}}
 \hrule\vspace{{.45cm}}
 \section*{{Synthèse exécutive}}
 \textit{{Cette page présente les indicateurs à retenir. Les résultats détaillés et la méthode figurent en annexe.}}\\[.5cm]
+\makebox[\textwidth]{{\kpi[{kpi_color(metrics, 'fiability')}]{{Fiabilité}}{{{number(int(metrics['fiability']))}{net_val(network_metrics, 'fiability', number)}}}\hfill
 \kpi{{Passages analysés}}{{{number(int(metrics['passages']))}{net_val(network_metrics, 'passages', number)}}}\hfill
-\kpi[{kpi_color(metrics, 'ponctualite')}]{{Ponctualité (retard $\leq$ 5 min)}}{{{pct(float(metrics['ponctualite']))}{net_val(network_metrics, 'ponctualite', pct)}}}\hfill
-\kpi[{kpi_color(metrics, 'retard')}]{{Retard moyen}}{{{duration(float(metrics['retard']))}{net_val(network_metrics, 'retard', duration)}}}\\[.35cm]
-\hspace{{.17\textwidth}}\kpi[{kpi_color(metrics, 'retard_median')}]{{Retard médian}}{{{duration(float(metrics['retard_median']))}{net_val(network_metrics, 'retard_median', duration)}}}\hfill
-\kpi[{kpi_color(metrics, 'skip_rate')}]{{Arrêts sautés}}{{{pct(float(metrics['skip_rate']), 2)}{net_val(network_metrics, 'skip_rate', lambda v: pct(v, 2))}}}
+\kpi[{kpi_color(metrics, 'ponctualite')}]{{Ponctualité (retard $\leq$ 5 min)}}{{{pct(float(metrics['ponctualite']))}{net_val(network_metrics, 'ponctualite', pct)}}}}}
+
+\vspace{{1cm}}
+\makebox[\textwidth]{{\kpi[{kpi_color(metrics, 'retard')}]{{Retard moyen}}{{{duration(float(metrics['retard']))}{net_val(network_metrics, 'retard', duration)}}}\hfill
+\kpi[{kpi_color(metrics, 'retard_median')}]{{Retard médian}}{{{duration(float(metrics['retard_median']))}{net_val(network_metrics, 'retard_median', duration)}}}\hfill
+\kpi[{kpi_color(metrics, 'skip_rate')}]{{Arrêts sautés}}{{{pct(float(metrics['skip_rate']), 2)}{net_val(network_metrics, 'skip_rate', lambda v: pct(v, 2))}}}}}
 
 \vspace{{.7cm}}
-\begin{{tabularx}}{{\textwidth}}{{@{{}}lXXX@{{}}}}
+\begin{{tabularx}}{{\textwidth}}{{@{{}}lXXXX@{{}}}}
 \toprule
- & \textbf{{Ponctualité}} & \textbf{{Retards moyen / médian}} & \textbf{{Arrêts sautés}} \\
+ & \textbf{{Fiabilité}} & \textbf{{Ponctualité}} & \textbf{{Retards moyen / médian}} & \textbf{{Arrêts sautés}} \\
 \midrule
-\textbf{{Évolution}} & {latex(change['ponctualite'])} & {latex(change['retard'])} & {latex(change['skip_rate'])} \\
+\textbf{{Évolution}} & {latex(change['fiability'])} & {latex(change['ponctualite'])} & {latex(change['retard'])} & {latex(change['skip_rate'])} \\
 \bottomrule
 \end{{tabularx}}
 
@@ -750,14 +798,25 @@ Contrairement à une simple mesure de temps, cet indicateur combine deux facteur
 \item Un score faible indique une ligne prioritaire à corriger.
 \item Ce rapport repose sur l'analyse des données GTFS-RT consolidées (observations sorties du flux depuis plus de 20 minutes) et permet de mesurer la qualité de service observée, sans en analyser les causes opérationnelles.
 \end{{itemize}}
+
+\subsection*{{Précision et limites}}
+\textbf{{Marge d'incertitude.}} Les retards sont calculés à partir de l'heure de départ effective transmise par le véhicule dans le flux GTFS-RT. Ce flux est interrogé toutes les 60~secondes~; l'heure réelle de départ peut donc précéder ou suivre l'observation d'au plus 60~secondes. Cette marge d'incertitude ($\pm 60$~s) est inhérente au dispositif de collecte et ne remet pas en cause la pertinence des tendances présentées.
+
+\textbf{{Trous de collecte.}} Lorsque le service de collecte est interrompu (redémarrage, indisponibilité réseau), les données produites pendant l'intervalle sont exclues de l'analyse.
+{gap_line}
+{evolution_note}
+
+\vspace{{.4cm}}
+\hrule\vspace{{.3cm}}
+\small Elias Khallouk --- eliaskhallouk@gmail.com \hfill Vigie-TBM --- {latex(collected_at)}
 \end{{document}}
 """
 
 
 def compile_pdf(tex_path: Path) -> Path:
-    executable = shutil.which("pdflatex")
+    executable = shutil.which("xelatex") or shutil.which("lualatex")
     if not executable:
-        raise RuntimeError("pdflatex est introuvable. Le fichier .tex a été généré, mais ne peut pas être compilé en PDF.")
+        raise RuntimeError("xelatex/lualatex introuvable. Le fichier .tex a été généré, mais ne peut pas être compilé en PDF.")
     command = [executable, "-interaction=nonstopmode", "-halt-on-error", tex_path.name]
     for _ in range(2):
         result = subprocess.run(command, cwd=tex_path.parent, text=True, capture_output=True)
@@ -813,10 +872,11 @@ def main() -> int:
                         network_lines = make_line_stats(net_scheduled, net_skipped)
                     stop_stats = query_stop_stats(conn, month, scope)
                 monthly_evolution = query_monthly_evolution(conn, month, scope)
+                gaps = query_collection_gaps(conn, month)
                 content = build_latex(month, scope, current, comparison(current, previous),
                                       lines, scheduled, collected_at,
                                       network_metrics, network_lines, stop_stats,
-                                      monthly_evolution)
+                                      monthly_evolution, gaps)
         args.output_dir.mkdir(parents=True, exist_ok=True)
         tex_path = args.output_dir / f"vigie-tbm-{month}-{safe_slug(scope.recipient)}.tex"
         tex_path.write_text(content, encoding="utf-8")

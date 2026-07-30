@@ -39,3 +39,17 @@ ubuntu@ek-hub-vnic:~/Vigie-TBM$ tail -f data/collect.log
 (.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ sudo systemctl status vigie-tbm-dashboard.service 
 
 //avant :(.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ .venv/bin/streamlit run dashboard/app.py
+
+
+#### GÉNERER LES RAPPORTS
+##### Rapport réseau
+./reports/generate_single_report.py --month 2026-07 --network --compile
+
+##### Rapport commune
+./reports/generate_single_report.py --month 2026-07 --commune "Mérignac" --compile
+
+##### Rapports de toutes les communes + Bordeaux Métropole :
+./reports/generate_all_reports.py --month 2026-07 --compile
+
+(.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ .venv/bin/python reports/generate_all_municipal_reports.py --month 2026-07 --compile
+(.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$  bash /home/ubuntu/Vigie-TBM/reports/output/2026-07/communes/compile_all.sh

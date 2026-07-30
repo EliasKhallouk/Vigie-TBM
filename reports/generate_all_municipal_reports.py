@@ -56,8 +56,6 @@ def main() -> int:
             "--db-path", str(args.db_path), "--recipient", f"Mairie de {municipality}",
             "--communes", municipality, "--output-dir", str(destination),
         ]
-        if args.compile:
-            command.append("--compile")
         print(f"[{index}/{len(municipalities)}] {municipality}")
         result = subprocess.run(command, text=True, capture_output=True)
         if result.returncode:
@@ -69,7 +67,27 @@ def main() -> int:
     index_csv = batch_dir / "index.csv"
     if index_csv.exists():
         index_csv.unlink()
-    print(f"{len(municipalities)} rapports générés. Répertoire : {batch_dir}")
+
+    # Compilation PDF via script shell (xelatex est x86-64, pas lançable depuis Python ARM/QEMU)
+    if args.compile:
+        compile_script = batch_dir / "compile_all.sh"
+        compile_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -e\n"
+            'cd "$(dirname "$0")"\n'
+            'find . -name "*.tex" | while read -r tex; do\n'
+            '  dir=$(dirname "$tex")\n'
+            '  name=$(basename "$tex" .tex)\n'
+            '  echo "Compilation : $name"\n'
+            '  (cd "$dir" && "/usr/bin/xelatex" -interaction=nonstopmode -halt-on-error "$name")\n'
+            '  (cd "$dir" && "/usr/bin/xelatex" -interaction=nonstopmode -halt-on-error "$name")\n'
+            "done\n"
+        )
+        compile_script.chmod(0o755)
+        print(f"  Script de compilation genere : {compile_script}")
+        print(f"  Lancez-le manuellement : bash {compile_script}")
+
+    print(f"{len(municipalities)} rapports generes. Repertoire : {batch_dir}")
     return 1 if failures else 0
 
 
