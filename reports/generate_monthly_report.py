@@ -16,7 +16,8 @@ import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from calendar import monthrange
+from datetime import datetime, timezone
 from pathlib import Path
 
 import matplotlib
@@ -352,6 +353,42 @@ def query_collection_gaps(conn: sqlite3.Connection, month: str) -> dict:
     return {"gap_seconds": int(gap_seconds), "total_raw": int(total_raw)}
 
 
+def query_service_alerts(conn: sqlite3.Connection, month: str, route_ids: set[str]) -> list[dict]:
+    """Return service alerts active during the calendar month for the given route_ids."""
+    if not route_ids:
+        return []
+    table_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='service_alerts'"
+    ).fetchone()
+    if not table_exists:
+        return []
+    year, mon = map(int, month.split("-"))
+    start_of_month = int(datetime(year, mon, 1, tzinfo=timezone.utc).timestamp())
+    last_day = monthrange(year, mon)[1]
+    end_of_month = int(datetime(year, mon, last_day, 23, 59, 59, tzinfo=timezone.utc).timestamp())
+    placeholders = ", ".join("?" for _ in route_ids)
+    rows = conn.execute(f"""
+        SELECT alert_id, route_id, active_period_start, active_period_end,
+               header_text, description_text
+        FROM service_alerts
+        WHERE active_period_start <= ?
+          AND (active_period_end IS NULL OR active_period_end >= ?)
+          AND (route_id = '' OR route_id IN ({placeholders}))
+        ORDER BY active_period_start DESC
+    """, [end_of_month, start_of_month] + list(route_ids)).fetchall()
+    return [
+        {
+            "alert_id": r[0],
+            "route_id": r[1],
+            "active_period_start": r[2],
+            "active_period_end": r[3],
+            "header_text": r[4],
+            "description_text": r[5],
+        }
+        for r in rows
+    ]
+
+
 def make_line_stats(scheduled: pd.DataFrame, skipped: pd.DataFrame) -> pd.DataFrame:
     rows = scheduled.groupby(["route_id", "ligne"], as_index=False).agg(
         passages=("departure_delay", "size"),
@@ -430,13 +467,16 @@ def executive_message(metrics: dict[str, float | int], lines: pd.DataFrame, scop
     )
 
 
-def line_table(lines: pd.DataFrame, network_lines: pd.DataFrame | None = None) -> str:
+def line_table(lines: pd.DataFrame, network_lines: pd.DataFrame | None = None,
+               alert_routes: set[str] | None = None) -> str:
     net_lookup: dict[str, tuple] = {}
     if network_lines is not None and not network_lines.empty:
         net_lookup = {row.route_id: row for row in network_lines.itertuples()}
+    alert_routes = alert_routes or set()
     table_rows = []
     for row in lines.itertuples():
         net_row = net_lookup.get(row.route_id)
+        prefix = r"\alertmark{} " if row.route_id in alert_routes else ""
         ponctualite_cell = pct(row.ponctualite)
         retard_5_cell = pct(row.retard_5)
         arrets_cell = pct(row.arrets_sautes, 2)
@@ -447,7 +487,7 @@ def line_table(lines: pd.DataFrame, network_lines: pd.DataFrame | None = None) -
             arrets_cell += f" {{\\tiny\\color{{gray}}({pct(net_row.arrets_sautes, 2)})}}"
             passages_cell += f" {{\\tiny\\color{{gray}}({number(int(net_row.passages))})}}"
         table_rows.append(
-            f"{latex(row.ligne)} & {passages_cell} & {ponctualite_cell} & "
+            f"{prefix}{latex(row.ligne)} & {passages_cell} & {ponctualite_cell} & "
             f"{duration(row.retard_moyen)} / {duration(row.retard_median)} & {retard_5_cell} & {arrets_cell} \\\\"
         )
     return "\n".join(table_rows)
@@ -743,7 +783,8 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
                 network_lines: pd.DataFrame | None = None,
                 stop_stats: pd.DataFrame | None = None,
                 monthly_evolution: pd.DataFrame | None = None,
-                gaps: dict | None = None) -> str:
+                gaps: dict | None = None,
+                alerts: list[dict] | None = None) -> str:
     report_date = datetime.strptime(month, "%Y-%m")
     report_month = f"{FRENCH_MONTHS[report_date.month - 1]} {report_date.year}"
     worst = lines.head(3)
@@ -766,12 +807,43 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
     evolution_note = rf"\textbf{{Évolution mensuelle.}} {change.get('fiability', '')}"
 
 
-    alerts = "\n".join(
-        rf"\item \textbf{{Ligne {latex(row.ligne)}}}"
+    alert_routes = {a["route_id"] for a in (alerts or []) if a["route_id"]}
+
+    priority_alerts = "\n".join(
+        rf"\item \alertmark{{}} \textbf{{Ligne {latex(row.ligne)}}}"
         + (f" (rang réseau : {net_rank.get(row.route_id, '—')}/{net_total})" if net_rank else "")
         + f" : score {row.score:.1f}/100, {pct(row.retard_5)} de retards supérieurs à 5 minutes, {pct(row.arrets_sautes, 2)} d'arrêts sautés."
         for row in worst.itertuples()
     )
+
+    # Format service alerts for "Perturbations en cours"
+    if alerts:
+        alert_items = []
+        seen = set()
+        for a in alerts:
+            key = (a["alert_id"], a["route_id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            start = datetime.fromtimestamp(a["active_period_start"]).strftime("%d/%m")
+            period = f"début {start} (en cours)"
+            if a["active_period_end"]:
+                end = datetime.fromtimestamp(a["active_period_end"]).strftime("%d/%m")
+                period = f"du {start} au {end}"
+            ligne = a["route_id"] if a["route_id"] else "Réseau"
+            header = a["header_text"] or "(information non disponible)"
+            alert_items.append(
+                rf"\item \textbf{{Ligne {latex(ligne)}}} : {latex(header)} ({period})"
+            )
+        perturbations = (
+            "\n\\vspace{.35cm}\n"
+            "\\textbf{Perturbations en cours}\n"
+            "\\begin{itemize}[leftmargin=1.4em,itemsep=.25em]\n"
+            + "\n".join(alert_items)
+            + "\n\\end{itemize}"
+        )
+    else:
+        perturbations = ""
 
     return rf"""\documentclass[10pt,a4paper]{{article}}
 \usepackage[french]{{babel}}
@@ -786,6 +858,7 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
 \pagestyle{{fancy}}\fancyhf{{}}\lhead{{\textcolor{{vigiebleu}}{{VIGIE TBM}}}}\rhead{{Rapport mensuel}}\cfoot{{\thepage}}
 \setlength{{\parindent}}{{0pt}}
 \newcommand{{\kpi}}[3][vigiebleu]{{\begin{{tcolorbox}}[width=.28\textwidth,sharp corners,boxrule=0pt,leftrule=3pt,colback=vigielight,colframe=#1,arc=0pt,outer arc=0pt,left=6pt,right=4pt,top=4pt,bottom=4pt,halign=flush left,valign=top]{{\scriptsize #2\\[3pt]}}{{\Large\bfseries\color{{#1}} #3}}\end{{tcolorbox}}}}
+\newcommand{{\alertmark}}{{\textcolor{{alert}}{{⚠}}}}
 
 \begin{{document}}
 \begin{{center}}
@@ -825,8 +898,9 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
 \vspace{{.35cm}}
 \textbf{{Alertes prioritaires}}
 \begin{{itemize}}[leftmargin=1.4em,itemsep=.25em]
-{alerts}
+{priority_alerts}
 \end{{itemize}}
+{perturbations}
 
 \vfill
 \small\color{{gray}} Source : flux GTFS-RT TripUpdates TBM, données arrêtées au {latex(collected_at)}. Les vingt dernières minutes du flux sont exclues afin de ne considérer que des observations stabilisées.
@@ -844,7 +918,7 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
 \textbf{{Ligne}} & \textbf{{Passages}} & \textbf{{À l'heure}} & \textbf{{Retards moy. / méd.}} & \textbf{{> 5 min}} & \textbf{{Arrêts sautés}} \\
 \midrule
 \endhead
-{line_table(lines, network_lines)}
+{line_table(lines, network_lines, alert_routes)}
 \bottomrule
 \end{{longtable}}
 
@@ -877,6 +951,8 @@ Contrairement à une simple mesure de temps, cet indicateur combine deux facteur
 \textbf{{Trous de collecte.}} Lorsque le service de collecte est interrompu (redémarrage, indisponibilité réseau), les données produites pendant l'intervalle sont exclues de l'analyse.
 {gap_line}
 {evolution_note}
+
+\textbf{{Alertes travaux.}} Les alertes affichées dans la synthèse exécutive (\alertmark) sont issues du flux ServiceAlerts TBM et sont reproduites à titre indicatif. Elles ne sont pas utilisées pour filtrer ou corriger les indicateurs de ponctualité. La présence d'une alerte sur une ligne ne signifie pas que les retards ou arrêts sautés observés sont causés par les travaux annoncés.
 
 \vspace{{.4cm}}
 \hrule\vspace{{.3cm}}
@@ -945,11 +1021,13 @@ def main() -> int:
                     stop_stats = query_stop_stats(conn, month, scope)
                 monthly_evolution = query_monthly_evolution(conn, month, scope)
                 gaps = query_collection_gaps(conn, month)
+                route_ids = set(scheduled["route_id"].unique()) if not scheduled.empty else set()
+                alerts_data = query_service_alerts(conn, month, route_ids) if route_ids else []
                 content = build_latex(month, scope, current, comparison(current, previous),
                                       lines, scheduled, collected_at,
                                       args.output_dir,
                                       network_metrics, network_lines, stop_stats,
-                                      monthly_evolution, gaps)
+                                      monthly_evolution, gaps, alerts_data)
         args.output_dir.mkdir(parents=True, exist_ok=True)
         tex_path = args.output_dir / f"vigie-tbm-{month}-{safe_slug(scope.recipient)}.tex"
         tex_path.write_text(content, encoding="utf-8")

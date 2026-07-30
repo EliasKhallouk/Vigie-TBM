@@ -1,7 +1,7 @@
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parents[1] / "data" / "vigie_tbm.db"
+DB_PATH = Path(__file__).resolve().parents[2] / "data" / "vigie_tbm.db"
 conn = sqlite3.connect(DB_PATH)
 conn.executescript("""
 CREATE TABLE IF NOT EXISTS observations (

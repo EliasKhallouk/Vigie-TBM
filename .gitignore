@@ -4,5 +4,5 @@ __pycache__/
 .venv/
 reports/output/
 reports/recipients.json
-coll
+data/*.log
 data/collect.log
