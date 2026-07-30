@@ -19,7 +19,26 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import numpy as np
 import pandas as pd
+
+matplotlib.rcParams.update({
+    "font.family": "Inter",
+    "font.size": 9,
+    "axes.unicode_minus": False,
+})
+plt.rcParams["axes.prop_cycle"] = plt.cycler(color=["#009EE3", "#94C21E", "#E7007C", "#4A4A4A", "#E8E9EB"])
+
+TBM_BLEU = "#009EE3"
+TBM_VERT = "#94C21E"
+TBM_MAGENTA = "#E7007C"
+TBM_ORANGE = "#F5A623"
+TBM_GRIS = "#E8E9EB"
+TBM_GRIS_TEXTE = "#4A4A4A"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = PROJECT_ROOT / "data" / "vigie_tbm.db"
@@ -75,17 +94,17 @@ def kpi_color(metrics: dict, key: str) -> str:
     """Return a LaTeX color name based on the metric value."""
     if key == "fiability":
         v = metrics[key]
-        return "vigiegreen" if v >= 90 else "vigieblue" if v >= 80 else "alert"
+        return "vigiebleu" if v >= 80 else "alert"
     if key == "ponctualite":
         v = metrics[key]
-        return "vigiegreen" if v >= 90 else "vigieblue" if v >= 80 else "alert"
+        return "vigiebleu" if v >= 80 else "alert"
     if key in ("retard", "retard_median"):
         v = abs(metrics[key])
-        return "vigiegreen" if v <= 60 else "vigieblue" if v <= 120 else "alert"
+        return "vigiebleu" if v <= 120 else "alert"
     if key == "skip_rate":
         v = metrics[key]
-        return "vigiegreen" if v <= 1 else "vigieblue" if v <= 5 else "alert"
-    return "vigieblue"
+        return "vigiebleu" if v <= 5 else "alert"
+    return "vigiebleu"
 
 
 def net_val(network_metrics: dict | None, key: str, formatter) -> str:
@@ -194,7 +213,7 @@ def query_observations(conn: sqlite3.Connection, month: str, scope: Scope) -> tu
         FROM observations o
         LEFT JOIN routes r ON r.route_id = o.route_id
         WHERE o.last_seen_at < ?
-          AND strftime('%Y-%m', datetime(o.departure_time, 'unixepoch', 'localtime')) = ?
+          AND strftime('%Y-%m', datetime(COALESCE(o.departure_time, o.last_seen_at), 'unixepoch', 'localtime')) = ?
           {route_filter}
           {commune_filter}
     """
@@ -214,7 +233,7 @@ def query_observations(conn: sqlite3.Connection, month: str, scope: Scope) -> tu
 
 
 def query_stop_stats(conn: sqlite3.Connection, month: str, scope: Scope) -> pd.DataFrame:
-    """Return per-stop delay statistics for the given scope."""
+    """Return per-stop delay statistics for the given scope, with the dominant ligne."""
     latest = conn.execute("SELECT MAX(last_seen_at) FROM observations").fetchone()[0]
     if latest is None:
         raise ValueError("La base ne contient aucune observation.")
@@ -234,7 +253,8 @@ def query_stop_stats(conn: sqlite3.Connection, month: str, scope: Scope) -> pd.D
         )
         params.extend(scope.communes)
     query = f"""
-        SELECT o.stop_id, COALESCE(s.stop_name, o.stop_id) AS stop_name, o.departure_delay
+        SELECT o.stop_id, COALESCE(s.stop_name, o.stop_id) AS stop_name,
+               o.departure_delay, o.route_id
         FROM observations o
         LEFT JOIN stops s ON o.stop_id = s.stop_id
         WHERE o.last_seen_at < ?
@@ -251,7 +271,10 @@ def query_stop_stats(conn: sqlite3.Connection, month: str, scope: Scope) -> pd.D
         retard_moyen=("departure_delay", "mean"),
         retard_median=("departure_delay", "median"),
         passages=("departure_delay", "count"),
+        main_route=("route_id", lambda xs: xs.value_counts().index[0]),
     ).sort_values("retard_median", ascending=False)
+    route_names = pd.read_sql_query("SELECT route_id, route_short_name FROM routes", conn)
+    stats = stats.merge(route_names, left_on="main_route", right_on="route_id", how="left")
     return stats
 
 
@@ -297,13 +320,22 @@ def query_monthly_evolution(conn: sqlite3.Connection, month: str, scope: Scope) 
 
 def query_collection_gaps(conn: sqlite3.Connection, month: str) -> dict:
     """Return gap stats and total observations for the methodology section."""
+    table_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='collection_gaps'"
+    ).fetchone()
+    if not table_exists:
+        total_raw = conn.execute(
+            "SELECT COUNT(*) FROM observations o "
+            "LEFT JOIN routes r ON r.route_id = o.route_id "
+            "WHERE strftime('%Y-%m', datetime(o.departure_time, 'unixepoch', 'localtime')) = ?",
+            (month,)
+        ).fetchone()[0] or 0
+        return {"gap_seconds": 0, "total_raw": int(total_raw)}
+
     gap_seconds = conn.execute(
         "SELECT COALESCE(SUM(gap_end - gap_start), 0) FROM collection_gaps "
-
         "WHERE strftime('%Y-%m', datetime(gap_start, 'unixepoch')) = ? "
-
         "OR strftime('%Y-%m', datetime(gap_end, 'unixepoch')) = ?",
-
         (month, month)
     ).fetchone()[0] or 0
 
@@ -421,11 +453,6 @@ def line_table(lines: pd.DataFrame, network_lines: pd.DataFrame | None = None) -
     return "\n".join(table_rows)
 
 
-def pgf_number(value: float) -> str:
-    """PGFPlots expects a decimal point, unlike textual numbers in the report."""
-    return f"{float(value):.2f}"
-
-
 def operational_views(scheduled: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build the hourly-risk and delay-distribution views shown in the dashboard."""
     dated = scheduled.dropna(subset=["departure_time"]).copy()
@@ -438,6 +465,10 @@ def operational_views(scheduled: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
         retard_median=("departure_delay", "median"),
         retard_5=("departure_delay", lambda values: (values > 300).mean() * 100),
     )
+    all_hours = pd.DataFrame({"heure": range(24)})
+    hourly = all_hours.merge(hourly, on="heure", how="left").fillna(
+        {"passages": 0, "retard_5": 0.0, "retard_moyen": 0.0, "retard_median": 0.0}
+    )
     bins = [-3600, -600, -300, -120, -60, 0, 60, 120, 300, 600, 1200, 3601]
     labels = ["< -10", "-10 a -5", "-5 a -2", "-2 a -1", "-1 a 0", "0 a +1", "+1 a +2", "+2 a +5", "+5 a +10", "+10 a +20", "> +20"]
     classes = pd.cut(dated["departure_delay"].clip(-3600, 3600), bins=bins, labels=labels, right=False)
@@ -445,189 +476,232 @@ def operational_views(scheduled: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
     return hourly, distribution
 
 
-def reliability_chart(lines: pd.DataFrame, network_lines: pd.DataFrame | None = None) -> str:
+def _score_color(value: float, thresholds: list[tuple[float, float, str]]) -> str:
+    """Return hex color based on thresholds: (low, high, color) tuples.
+    The first matching range (low <= value < high) wins."""
+    for lo, hi, color in thresholds:
+        if lo <= value < hi:
+            return color
+    return TBM_ORANGE
+
+
+SCORE_SEUILS = [(80, 101, TBM_VERT), (50, 80, TBM_ORANGE), (0, 50, TBM_MAGENTA)]
+RETARD_SEUILS = [(0, 60, TBM_VERT), (60, 180, TBM_ORANGE), (180, float("inf"), TBM_MAGENTA)]
+PCT5_SEUILS = [(0, 5, TBM_VERT), (5, 15, TBM_ORANGE), (15, 101, TBM_MAGENTA)]
+
+
+def _setup_ax(ax: plt.Axes) -> None:
+    ax.set_facecolor(TBM_GRIS)
+    ax.tick_params(color=TBM_GRIS_TEXTE, labelcolor=TBM_GRIS_TEXTE)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.spines["bottom"].set_visible(True)
+    ax.spines["bottom"].set_color(TBM_GRIS_TEXTE + "30")
+    ax.spines["left"].set_visible(True)
+    ax.spines["left"].set_color(TBM_GRIS_TEXTE + "30")
+    ax.grid(axis="y", color=TBM_GRIS_TEXTE, alpha=0.15, linewidth=0.5)
+    ax.grid(axis="x", color=TBM_GRIS_TEXTE, alpha=0.15, linewidth=0.5)
+
+
+def _save_chart(fig: plt.Figure, output_dir: Path, name: str) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"{name}.png"
+    fig.savefig(path, dpi=180, bbox_inches="tight", facecolor="white", edgecolor="none")
+    plt.close(fig)
+    return path
+
+
+def reliability_chart(lines: pd.DataFrame, output_dir: Path, name: str,
+                      network_lines: pd.DataFrame | None = None) -> Path | None:
     selected = lines.head(15).reset_index(drop=True)
     if selected.empty:
-        return ""
-    ticks = ",".join(str(index) for index in selected.index)
-    labels = ",".join(latex(value) for value in selected["ligne"])
-    coordinates = " ".join(f"({pgf_number(row.score)},{index})" for index, row in selected.iterrows())
-    height = max(5.0, len(selected) * 0.42)
-
-    net_coordinates = ""
-    show_legend = False
+        return None
+    fig, ax = plt.subplots(figsize=(7.5, max(2.5, len(selected) * 0.35)))
+    _setup_ax(ax)
+    colors = [_score_color(float(r.score), SCORE_SEUILS) for _, r in selected.iterrows()]
+    y = range(len(selected))
+    ax.barh(y, selected["score"], color=colors, height=0.55, zorder=3, edgecolor="white", linewidth=0.3, label="Score")
     if network_lines is not None and not network_lines.empty:
         net_scores = []
-        for index, row in selected.iterrows():
-            net_row = network_lines[network_lines["route_id"] == row.route_id]
-            if not net_row.empty:
-                net_scores.append((pgf_number(float(net_row.iloc[0]["score"])), index))
-        if net_scores:
-            net_coordinates = " ".join(f"({score},{index})" for score, index in net_scores)
-            show_legend = True
-
-    legend_block = r"\legend{Périmètre, Réseau TBM}" if show_legend else ""
-    bar_width = 7
-    bar_shift = 3.5
-    if show_legend:
-        bar_width = 5
-        bar_shift = 2.5
-    net_shift = -bar_shift
-    net_plot_block = (
-        rf"\addplot[fill=gray!35, draw=gray!60!black, bar shift={net_shift}pt] coordinates {{{net_coordinates}}};"
-        if net_coordinates else ""
-    )
-
-    return rf"""
-\subsection*{{Priorités de fiabilité par ligne}}
-\textit{{Les quinze lignes au score le plus faible sont présentées. Plus le score est bas, plus la priorité de suivi est élevée.}}\\[.2cm]
-\begin{{center}}
-\begin{{tikzpicture}}
-\begin{{axis}}[xbar, width=.94\textwidth, height={height:.1f}cm, xmin=0, xmax=100,
-  xlabel={{Score de fiabilité / 100}},
-  ytick={{{ticks}}}, yticklabels={{{labels}}},
-  y dir=reverse, grid=major, grid style={{gray!20}}, bar width={bar_width}pt,
-  legend style={{at={{(0.5,-0.12)}}, anchor=north, legend columns=-1, font=\footnotesize}}]
-{net_plot_block}
-\addplot[fill=vigieblue!82, draw=vigieblue, bar shift={bar_shift}pt] coordinates {{{coordinates}}};
-{legend_block}
-\end{{axis}}
-\end{{tikzpicture}}
-\end{{center}}
-"""
+        for i, row in selected.iterrows():
+            nr = network_lines[network_lines["route_id"] == row.route_id]
+            net_scores.append(float(nr.iloc[0]["score"]) if not nr.empty else 0)
+        ax.barh(y, net_scores, color=TBM_GRIS_TEXTE, height=0.18, alpha=0.35, zorder=4, label="Réseau")
+        ax.legend(fontsize=7, loc="lower right")
+    for i, row in selected.iterrows():
+        ax.text(float(row.score) + 0.8, i, f"{row.score:.0f}", va="center", fontsize=7, color=TBM_GRIS_TEXTE)
+    ax.set_yticks(list(y))
+    ax.set_yticklabels(selected["ligne"].tolist(), fontsize=7)
+    ax.set_xlim(0, 105)
+    ax.set_xlabel("Score de fiabilité / 100", color=TBM_GRIS_TEXTE, fontsize=8)
+    ax.set_ylabel("Ligne", color=TBM_GRIS_TEXTE, fontsize=8)
+    ax.xaxis.set_major_locator(mticker.MultipleLocator(20))
+    ax.set_title("Priorités de fiabilité par ligne", color=TBM_GRIS_TEXTE, fontsize=10, fontweight="bold")
+    fig.tight_layout(pad=0.8)
+    return _save_chart(fig, output_dir, name)
 
 
-def stop_chart(stop_stats: pd.DataFrame) -> str:
-    if stop_stats.empty:
-        return ""
-    selected = stop_stats.head(12).reset_index(drop=True)
-    ticks = ",".join(str(index) for index in selected.index)
-    labels = ",".join(latex(value) for value in selected["stop_name"])
-    coords_moyen = " ".join(f"({pgf_number(row.retard_moyen)},{index})" for index, row in selected.iterrows())
-    coords_median = " ".join(f"({pgf_number(row.retard_median)},{index})" for index, row in selected.iterrows())
-    height = max(4.0, len(selected) * 0.50)
-    worst = stop_stats.iloc[0]
-    return rf"""
-\subsection*{{Arrêts les plus problématiques du périmètre}}
-\textit{{Les douze arrêts ayant le retard médian le plus élevé. L'arrêt {latex(worst.stop_name)} ({duration(float(worst.retard_moyen))} en moyenne, {duration(float(worst.retard_median))} en médiane) est le plus critique.}}\\[.2cm]
-\begin{{center}}
-\begin{{tikzpicture}}
-\begin{{axis}}[xbar, width=.94\textwidth, height={height:.1f}cm,
-  xlabel={{Retard (secondes)}},
-  ytick={{{ticks}}}, yticklabels={{{labels}}},
-  y dir=reverse, grid=major, grid style={{gray!20}}, bar width=5pt,
-  legend style={{at={{(0.5,-0.10)}}, anchor=north, legend columns=-1, font=\footnotesize}}]
-\addplot[fill=vigieblue!70, draw=vigieblue, bar shift=-2.5pt] coordinates {{{coords_moyen}}};
-\addplot[fill=vigieorange!85, draw=vigieorange!90!black, bar shift=2.5pt] coordinates {{{coords_median}}};
-\legend{{Moyen, Médian}}
-\end{{axis}}
-\end{{tikzpicture}}
-\end{{center}}
-"""
-
-
-def evolution_chart(monthly: pd.DataFrame) -> str:
-    if monthly.empty or len(monthly) < 2:
-        return ""
-    ticks = ",".join(str(index) for index in range(len(monthly)))
-    labels = ",".join(latex(row.mois) for row in monthly.itertuples())
-    coords_ponctualite = " ".join(f"({index},{pgf_number(row.ponctualite)})" for index, row in monthly.iterrows())
-    return rf"""
-\subsection*{{Évolution mensuelle de la ponctualité}}
-\textit{{Taux de passages à l'heure (retard $\leq$ 5 min) sur le périmètre, mois par mois.}}\\[.2cm]
-\begin{{center}}
-\begin{{tikzpicture}}
-\begin{{axis}}[width=.92\textwidth, height=6cm, xlabel={{Mois}},
-  ylabel={{Ponctualité (\%)}}, ymin=50, ymax=100,
-  xtick={{{ticks}}}, xticklabels={{{labels}}},
-  grid=major, grid style={{gray!20}},
-  legend style={{at={{(0.5,-0.12)}}, anchor=north, legend columns=-1, font=\footnotesize}}]
-\addplot[color=vigieblue, very thick, mark=*, mark size=2.5pt] coordinates {{{coords_ponctualite}}};
-\legend{{Ponctualité}}
-\end{{axis}}
-\end{{tikzpicture}}
-\end{{center}}
-"""
-
-
-def risk_scatter_chart(lines: pd.DataFrame) -> str:
+def risk_scatter_chart(lines: pd.DataFrame, output_dir: Path, name: str) -> Path | None:
     if lines.empty:
-        return ""
-    coordinates = " ".join(f"({pgf_number(row.retard_moyen)},{pgf_number(row.retard_5)})" for row in lines.itertuples())
-    return rf"""
-\subsection*{{Carte de risque des lignes}}
-\textit{{Chaque point représente une ligne : plus il est à droite et en haut, plus son retard moyen et sa part de retards supérieurs à cinq minutes sont élevés.}}\\[.2cm]
-\begin{{center}}
-\begin{{tikzpicture}}
-\begin{{axis}}[width=.87\textwidth, height=7cm, xlabel={{Retard moyen (secondes)}},
-  ylabel={{Passages avec retard > 5 min (\%)}}, grid=major, grid style={{gray!20}}]
-\addplot[only marks, mark=*, mark size=2.2pt, color=vigieblue!80] coordinates {{{coordinates}}};
-\end{{axis}}
-\end{{tikzpicture}}
-\end{{center}}
-"""
+        return None
+    fig, ax = plt.subplots(figsize=(6.5, 5))
+    _setup_ax(ax)
+    for _, row in lines.iterrows():
+        c = _score_color(float(row.score), SCORE_SEUILS)
+        ax.scatter(float(row.retard_median), float(row.retard_5), c=c, s=30, zorder=3, edgecolors="white", linewidth=0.3)
+    for _, row in lines.iterrows():
+        ax.text(float(row.retard_median) + max(float(lines.retard_median.max()) * 0.025, 3),
+                float(row.retard_5), row.ligne, fontsize=6, color=TBM_GRIS_TEXTE, va="center")
+    xmax = float(lines.retard_median.max()) * 1.3 or 120
+    ymax = float(lines.retard_5.max()) * 1.3 or 30
+    ax.set_xlim(0, xmax)
+    ax.set_ylim(0, ymax)
+    ax.set_xlabel("Retard médian (secondes)", color=TBM_GRIS_TEXTE, fontsize=8)
+    ax.set_ylabel("Passages > 5 min (%)", color=TBM_GRIS_TEXTE, fontsize=8)
+    ax.set_title("Carte de risque des lignes", color=TBM_GRIS_TEXTE, fontsize=10, fontweight="bold")
+    ax.text(0.05, 0.92, "Retards rares mais longs", transform=ax.transAxes, fontsize=7, color=TBM_GRIS_TEXTE + "80", va="top")
+    ax.text(0.70, 0.92, "Zone critique", transform=ax.transAxes, fontsize=7, color=TBM_GRIS_TEXTE + "80", va="top")
+    ax.text(0.05, 0.05, "Risque faible", transform=ax.transAxes, fontsize=7, color=TBM_GRIS_TEXTE + "80", va="bottom")
+    ax.text(0.70, 0.05, "Retards fréquents mais courts", transform=ax.transAxes, fontsize=7, color=TBM_GRIS_TEXTE + "80", va="bottom")
+    fig.tight_layout(pad=0.8)
+    return _save_chart(fig, output_dir, name)
 
 
-def hourly_chart(hourly: pd.DataFrame) -> str:
+def stop_chart(stop_stats: pd.DataFrame, output_dir: Path, name: str) -> Path | None:
+    if stop_stats.empty:
+        return None
+    selected = stop_stats.head(12).iloc[::-1].reset_index(drop=True)
+    fig, ax = plt.subplots(figsize=(7, max(2.5, len(selected) * 0.4)))
+    _setup_ax(ax)
+    colors = [_score_color(float(r.retard_median), RETARD_SEUILS) for _, r in selected.iterrows()]
+    y = range(len(selected))
+    ax.barh([i - 0.15 for i in y], selected["retard_moyen"], height=0.25, color=colors, zorder=3, label="Moyen", edgecolor="white", linewidth=0.3, alpha=0.5)
+    ax.barh([i + 0.15 for i in y], selected["retard_median"], height=0.25, color=colors, zorder=3, label="Médian", edgecolor="white", linewidth=0.3)
+    for i, row in selected.iterrows():
+        ax.text(float(row.retard_moyen) + 1.5, i - 0.15, duration(float(row.retard_moyen)), va="center", fontsize=6, color=TBM_GRIS_TEXTE)
+        ax.text(float(row.retard_median) + 1.5, i + 0.15, duration(float(row.retard_median)), va="center", fontsize=6, color=TBM_GRIS_TEXTE)
+    labels = []
+    for _, row in selected.iterrows():
+        ligne = row.get("route_short_name") or row.get("main_route", "")
+        labels.append(f"{row.stop_name} ({ligne})" if ligne else row.stop_name)
+    ax.set_yticks(list(y))
+    ax.set_yticklabels(labels, fontsize=7)
+    ax.set_xlabel("Retard", color=TBM_GRIS_TEXTE, fontsize=8)
+    ax.set_title("Arrêts les plus problématiques du périmètre", color=TBM_GRIS_TEXTE, fontsize=10, fontweight="bold")
+    fig.tight_layout(pad=0.8)
+    return _save_chart(fig, output_dir, name)
+
+
+def evolution_chart(monthly: pd.DataFrame, output_dir: Path, name: str) -> Path | None:
+    if monthly.empty or len(monthly) < 2:
+        return None
+    fig, ax = plt.subplots(figsize=(7, 3.5))
+    _setup_ax(ax)
+    colors = [_score_color(float(r.ponctualite), SCORE_SEUILS) for _, r in monthly.iterrows()]
+    for i in range(len(monthly) - 1):
+        ax.plot([i, i + 1], [monthly.iloc[i]["ponctualite"], monthly.iloc[i + 1]["ponctualite"]],
+                color=TBM_GRIS_TEXTE, linewidth=1.5, zorder=2)
+    ax.scatter(range(len(monthly)), monthly["ponctualite"], c=colors, s=40, zorder=3, edgecolors="white", linewidth=0.5)
+    ax.set_ylim(50, 100)
+    ax.set_xticks(range(len(monthly)))
+    ax.set_xticklabels(monthly["mois"].tolist(), fontsize=7, rotation=30, ha="right")
+    ax.set_xlabel("Mois", color=TBM_GRIS_TEXTE, fontsize=8)
+    ax.set_ylabel("Ponctualité (%)", color=TBM_GRIS_TEXTE, fontsize=8)
+    ax.set_title("Évolution mensuelle de la ponctualité", color=TBM_GRIS_TEXTE, fontsize=10, fontweight="bold")
+    ax.yaxis.set_major_locator(mticker.MultipleLocator(10))
+    fig.tight_layout(pad=0.8)
+    return _save_chart(fig, output_dir, name)
+
+
+def hourly_chart(hourly: pd.DataFrame, output_dir: Path, name: str) -> Path | None:
     if hourly.empty:
-        return ""
-    coordinates = " ".join(f"({int(row.heure)},{pgf_number(row.retard_5)})" for row in hourly.itertuples())
-    return rf"""
-\subsection*{{Risque selon l'heure de départ}}
-\textit{{Part des passages accusant plus de cinq minutes de retard, selon l'heure locale de départ.}}\\[.2cm]
-\begin{{center}}
-\begin{{tikzpicture}}
-\begin{{axis}}[ybar, width=.88\textwidth, height=6.5cm, ymin=0, xlabel={{Heure locale}},
-  ylabel={{Retards > 5 min (\%)}}, xtick=data, grid=major, grid style={{gray!20}}, bar width=8pt]
-\addplot[fill=vigiegreen!85, draw=vigiegreen!90!black] coordinates {{{coordinates}}};
-\end{{axis}}
-\end{{tikzpicture}}
-\end{{center}}
-"""
+        return None
+    fig, ax = plt.subplots(figsize=(7, 4))
+    _setup_ax(ax)
+    colors = [_score_color(float(r.retard_5), PCT5_SEUILS) for _, r in hourly.iterrows()]
+    ax.bar(hourly["heure"], hourly["retard_5"], color=colors, width=0.7, zorder=3, edgecolor="white", linewidth=0.3)
+    for _, row in hourly.iterrows():
+        ax.text(int(row.heure), float(row.retard_5) + 0.5, f"{row.retard_5:.1f}",
+                ha="center", fontsize=6, color=TBM_GRIS_TEXTE)
+    ax.axvspan(7.5, 9.5, color=TBM_GRIS, alpha=0.4, zorder=1)
+    ax.axvspan(17.5, 19.5, color=TBM_GRIS, alpha=0.4, zorder=1)
+    net_avg = float(hourly["retard_5"].mean())
+    ax.axhline(net_avg, color=TBM_BLEU, linewidth=0.8, linestyle="--", zorder=2)
+    ax.text(23, net_avg, f"Moyenne réseau : {net_avg:.1f}%", fontsize=6, color=TBM_BLEU, va="bottom", ha="right")
+    ax.set_xlim(-0.5, 23.5)
+    ax.set_xticks(range(0, 24, 2))
+    ax.set_xlabel("Heure", color=TBM_GRIS_TEXTE, fontsize=8)
+    ax.set_ylabel("Retards > 5 min (%)", color=TBM_GRIS_TEXTE, fontsize=8)
+    ax.set_title("Risque selon l'heure de départ", color=TBM_GRIS_TEXTE, fontsize=10, fontweight="bold")
+    fig.tight_layout(pad=0.8)
+    return _save_chart(fig, output_dir, name)
 
 
-def distribution_chart(distribution: pd.DataFrame) -> str:
+def distribution_chart(distribution: pd.DataFrame, output_dir: Path, name: str) -> Path | None:
     if distribution.empty:
-        return ""
-    ticks = ",".join(str(index) for index in distribution.index)
-    labels = ",".join(latex(value) for value in distribution["plage"])
-    coordinates = " ".join(f"({index},{int(row.passages)})" for index, row in distribution.iterrows())
-    return rf"""
-\subsection*{{Distribution des écarts à l'horaire théorique}}
-\textit{{Nombre de passages par classe de retard ou d'avance.}}\\[.2cm]
-\begin{{center}}
-\begin{{tikzpicture}}
-\begin{{axis}}[ybar, width=.98\textwidth, height=6.5cm, xlabel={{Écart au départ théorique (minutes)}},
-  ylabel={{Nombre de passages}}, xtick={{{ticks}}}, xticklabels={{{labels}}},
-  x tick label style={{rotate=35, anchor=east}}, grid=major, grid style={{gray!20}}, bar width=8pt]
-\addplot[fill=vigieorange!84, draw=vigieorange!90!black] coordinates {{{coordinates}}};
-\end{{axis}}
-\end{{tikzpicture}}
-\end{{center}}
-"""
+        return None
+    fig, ax = plt.subplots(figsize=(7, 4))
+    _setup_ax(ax)
+    plages = distribution["plage"].tolist()
+    dist_color_map = {
+        "< -10": TBM_MAGENTA, "-10 a -5": TBM_MAGENTA, "-5 a -2": TBM_MAGENTA,
+        "-2 a -1": TBM_ORANGE,
+        "-1 a 0": TBM_VERT, "0 a +1": TBM_VERT, "+1 a +2": TBM_VERT,
+        "+2 a +5": TBM_ORANGE,
+        "+5 a +10": TBM_MAGENTA, "+10 a +20": TBM_MAGENTA, "> +20": TBM_MAGENTA,
+    }
+    colors = [dist_color_map.get(p, TBM_MAGENTA) for p in plages]
+    n = len(distribution)
+    ax.bar(range(n), distribution["passages"], color=colors, width=0.7, zorder=3, edgecolor="white", linewidth=0.3)
+    for i, (_, row) in enumerate(distribution.iterrows()):
+        ax.text(i, int(row.passages) + max(1, int(distribution.passages.max()) * 0.02),
+                str(int(row.passages)), ha="center", fontsize=7, color=TBM_GRIS_TEXTE)
+    ax.set_xticks(range(n))
+    ax.set_xticklabels(plages, fontsize=7, rotation=45, ha="right")
+    ax.set_xlabel("Tranche de retard (minutes)", color=TBM_GRIS_TEXTE, fontsize=8)
+    ax.set_ylabel("Nombre de passages", color=TBM_GRIS_TEXTE, fontsize=8)
+    ax.set_title("Distribution des retards", color=TBM_GRIS_TEXTE, fontsize=10, fontweight="bold")
+    fig.tight_layout(pad=0.8)
+    return _save_chart(fig, output_dir, name)
 
 
 def graphical_annex(lines: pd.DataFrame, scheduled: pd.DataFrame,
                      network_lines: pd.DataFrame | None = None,
                      stop_stats: pd.DataFrame | None = None,
-                     monthly_evolution: pd.DataFrame | None = None) -> str:
+                     monthly_evolution: pd.DataFrame | None = None,
+                     output_dir: Path | None = None) -> str:
+    if output_dir is None:
+        output_dir = Path("/tmp/vigie_charts")
     hourly, distribution = operational_views(scheduled)
-    parts = [
-        r"\newpage\section*{Annexe — Analyse graphique}",
-        reliability_chart(lines, network_lines),
-        risk_scatter_chart(lines),
-    ]
+    imgs: list[str] = []
+    imgs.append(r"\newpage\section*{Annexe — Analyse graphique}")
+    imgs.append(r"\small\textbf{Seuils de couleur utilisés dans les graphiques :} "
+                r"Vert = bonne performance ($\geq$ 80/100 pour le score de fiabilité, "
+                r"$\leq$ 60 s pour le retard moyen/médian, $\leq$ 5\% pour les retards $>$ 5 min), "
+                r"Orange = performance moyenne, "
+                r"Rouge = performance dégradée. Consulter la section Méthode pour le détail des calculs.\\[.3cm]")
+    p = reliability_chart(lines, output_dir, "reliability", network_lines)
+    if p:
+        imgs.append(r"\begin{center}\includegraphics[width=\textwidth]{" + str(p) + r"}\end{center}")
+    p = risk_scatter_chart(lines, output_dir, "risk_scatter")
+    if p:
+        imgs.append(r"\begin{center}\includegraphics[width=\textwidth]{" + str(p) + r"}\end{center}")
     if stop_stats is not None and not stop_stats.empty:
-        parts.append(stop_chart(stop_stats))
-    evo = evolution_chart(monthly_evolution) if monthly_evolution is not None else ""
-    if evo:
-        parts.append(evo)
-    parts.extend([
-        r"\newpage\section*{Annexe — Profil opérationnel}",
-        hourly_chart(hourly) or r"\textit{Aucune heure de départ exploitable pour cette période.}",
-        distribution_chart(distribution),
-    ])
-    return "\n".join(parts)
+        p = stop_chart(stop_stats, output_dir, "stops")
+        if p:
+            imgs.append(r"\begin{center}\includegraphics[width=\textwidth]{" + str(p) + r"}\end{center}")
+    if monthly_evolution is not None and len(monthly_evolution) >= 2:
+        p = evolution_chart(monthly_evolution, output_dir, "evolution")
+        if p:
+            imgs.append(r"\begin{center}\includegraphics[width=\textwidth]{" + str(p) + r"}\end{center}")
+    imgs.append(r"\newpage\section*{Annexe — Profil opérationnel}")
+    p = hourly_chart(hourly, output_dir, "hourly") if not hourly.empty else None
+    imgs.append(r"\begin{center}\includegraphics[width=\textwidth]{" + str(p) + r"}\end{center}" if p
+                else r"\textit{Aucune heure de départ exploitable pour cette période.}")
+    p = distribution_chart(distribution, output_dir, "distribution")
+    if p:
+        imgs.append(r"\begin{center}\includegraphics[width=\textwidth]{" + str(p) + r"}\end{center}")
+    return "\n".join(imgs)
 
 
 def build_no_data_latex(month: str, scope: Scope, collected_at: str) -> str:
@@ -664,6 +738,7 @@ Cette absence ne signifie pas nécessairement l'absence de desserte : elle peut 
 
 def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], change: dict[str, str],
                 lines: pd.DataFrame, scheduled: pd.DataFrame, collected_at: str,
+                output_dir: Path,
                 network_metrics: dict | None = None,
                 network_lines: pd.DataFrame | None = None,
                 stop_stats: pd.DataFrame | None = None,
@@ -688,11 +763,11 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
         gap_line = f"{excluded} observations exclues sur {gaps['total_raw']} ({gap_minutes}~min d\'interruption de collecte)."
     else:
         gap_line = "Aucune interruption de collecte significative sur la période."
-    evolution_note = f"\textbf{{Évolution mensuelle.}} {change.get('fiability', '')}"
+    evolution_note = rf"\textbf{{Évolution mensuelle.}} {change.get('fiability', '')}"
 
 
     alerts = "\n".join(
-        f"\\item \\textbf{{Ligne {latex(row.ligne)}}}"
+        rf"\item \textbf{{Ligne {latex(row.ligne)}}}"
         + (f" (rang réseau : {net_rank.get(row.route_id, '—')}/{net_total})" if net_rank else "")
         + f" : score {row.score:.1f}/100, {pct(row.retard_5)} de retards supérieurs à 5 minutes, {pct(row.arrets_sautes, 2)} d'arrêts sautés."
         for row in worst.itertuples()
@@ -703,17 +778,14 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
 \usepackage{{fontspec}}
 \setmainfont{{Lato}}
 \usepackage[margin=1.7cm]{{geometry}}
-\usepackage{{amsmath,booktabs,longtable,array,xcolor,tabularx,enumitem,pgfplots,tcolorbox}}
+\usepackage{{amsmath,booktabs,longtable,array,xcolor,tabularx,enumitem,graphicx,tcolorbox}}
 \usepackage{{fancyhdr}}
-\definecolor{{vigieblue}}{{HTML}}{{009EE3}}
+\definecolor{{vigiebleu}}{{HTML}}{{009EE3}}
 \definecolor{{vigielight}}{{HTML}}{{FFFFFF}}
 \definecolor{{alert}}{{HTML}}{{E7007C}}
-\definecolor{{vigiegreen}}{{HTML}}{{94C21E}}
-\definecolor{{vigieorange}}{{HTML}}{{009EE3}}
-\pgfplotsset{{compat=1.18}}
-\pagestyle{{fancy}}\fancyhf{{}}\lhead{{\textcolor{{vigieblue}}{{VIGIE TBM}}}}\rhead{{Rapport mensuel}}\cfoot{{\thepage}}
+\pagestyle{{fancy}}\fancyhf{{}}\lhead{{\textcolor{{vigiebleu}}{{VIGIE TBM}}}}\rhead{{Rapport mensuel}}\cfoot{{\thepage}}
 \setlength{{\parindent}}{{0pt}}
-\newcommand{{\kpi}}[3][vigieblue]{{\begin{{tcolorbox}}[width=.28\textwidth,sharp corners,boxrule=0pt,leftrule=3pt,colback=vigielight,colframe=#1,arc=0pt,outer arc=0pt,left=6pt,right=4pt,top=4pt,bottom=4pt,halign=flush left,valign=top]{{\scriptsize #2\\[3pt]}}{{\Large\bfseries\color{{#1}} #3}}\end{{tcolorbox}}}}
+\newcommand{{\kpi}}[3][vigiebleu]{{\begin{{tcolorbox}}[width=.28\textwidth,sharp corners,boxrule=0pt,leftrule=3pt,colback=vigielight,colframe=#1,arc=0pt,outer arc=0pt,left=6pt,right=4pt,top=4pt,bottom=4pt,halign=flush left,valign=top]{{\scriptsize #2\\[3pt]}}{{\Large\bfseries\color{{#1}} #3}}\end{{tcolorbox}}}}
 
 \begin{{document}}
 \begin{{center}}
@@ -776,7 +848,7 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
 \bottomrule
 \end{{longtable}}
 
-{graphical_annex(lines, scheduled, network_lines, stop_stats, monthly_evolution)}
+{graphical_annex(lines, scheduled, network_lines, stop_stats, monthly_evolution, output_dir)}
 
 \section*{{Méthode et calcul de la fiabilité}}
 L'indice de fiabilité est un score synthétique (de 0 à 100) conçu pour identifier rapidement les lignes de transport qui posent le plus de difficultés aux usagers.
@@ -875,6 +947,7 @@ def main() -> int:
                 gaps = query_collection_gaps(conn, month)
                 content = build_latex(month, scope, current, comparison(current, previous),
                                       lines, scheduled, collected_at,
+                                      args.output_dir,
                                       network_metrics, network_lines, stop_stats,
                                       monthly_evolution, gaps)
         args.output_dir.mkdir(parents=True, exist_ok=True)

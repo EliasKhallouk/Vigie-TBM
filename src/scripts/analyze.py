@@ -5,10 +5,12 @@ collectées. Ne considère que les observations "terminées" (le trajet
 est sorti du flux temps réel, donc le retard enregistré est définitif).
 """
 
+import logging
 import sqlite3
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+
 import pandas as pd
 
 DB_PATH = Path(__file__).resolve().parents[1] / "data" / "vigie_tbm.db"
@@ -17,9 +19,17 @@ FRESHNESS_BUFFER_SECONDS = 20 * 60  # 20 minutes
 
 def load_completed_observations(conn):
     max_ts = conn.execute("SELECT MAX(last_seen_at) FROM observations").fetchone()[0]
+    if max_ts is None:
+        return pd.DataFrame()
     cutoff = max_ts - FRESHNESS_BUFFER_SECONDS
 
-    gaps = conn.execute("SELECT gap_start, gap_end FROM collection_gaps").fetchall()
+    now = time.time()
+    min_plausible = int(datetime(2020, 1, 1).timestamp())
+    gaps = conn.execute(
+        "SELECT gap_start, gap_end FROM collection_gaps "
+        "WHERE gap_start >= ? AND gap_end <= ? AND gap_end > gap_start",
+        (min_plausible, int(now) + 3600),
+    ).fetchall()
 
     query = """
         SELECT o.*, r.route_short_name, s.stop_name
@@ -30,10 +40,15 @@ def load_completed_observations(conn):
     """
     df = pd.read_sql(query, conn, params=(cutoff,))
 
-    # Exclure toute observation figée juste avant un trou de collecte connu
     for gap_start, gap_end in gaps:
         suspect_window_start = gap_start - FRESHNESS_BUFFER_SECONDS
-        df = df[~df["last_seen_at"].between(suspect_window_start, gap_end)]
+        in_window = df["last_seen_at"].between(suspect_window_start, gap_end)
+        n_excluded = in_window.sum()
+        if n_excluded:
+            logger = logging.getLogger(__name__)
+            logger.info("Trou de collecte exclu : %d observations (fenêtre de %.0f min)",
+                        n_excluded, (gap_end - suspect_window_start) / 60)
+            df = df[~in_window]
 
     return df
 
