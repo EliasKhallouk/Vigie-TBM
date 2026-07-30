@@ -19,15 +19,22 @@ ubuntu@ek-hub-vnic:~$ cd Vigie-TBM/
 #### CRÉER LA BDD
 (.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ python3 src/scripts/db.py
 
-#### POUR LANCER LE SCRIPTE DE COLLECT 
+#### POUR LANCER LE SCRIPTE DE COLLECT DE DONNÉES
 (.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ sudo nano /etc/systemd/system/vigie-tbm-collect.service
 (.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ sudo systemctl daemon-reload
 (.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ sudo systemctl enable vigie-tbm-collect.service
 (.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ sudo systemctl start vigie-tbm-collect.service
 (.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ sudo systemctl status vigie-tbm-collect.service
 
-#### POUR AFFICHER LE STATUS DU SERVICE
-(.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ sudo systemctl status vigie-tbm-collect.service
+#### POUR LANCER LE SCRIPTE DE COLLECT D'ALERTES
+(.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ sudo nano /etc/systemd/system/vigie-tbm-collect.service
+(.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ sudo systemctl daemon-reload
+(.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ sudo systemctl enable vigie-tbm-collect-alerts.service
+(.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ sudo systemctl start vigie-tbm-collect-alerts.service
+(.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ sudo systemctl status vigie-tbm-collect-alerts.service
+
+#### POUR AFFICHER LE STATUS DES SERVICES
+(.venv) ubuntu@ek-hub-vnic:~/Vigie-TBM$ sudo systemctl status vigie-tbm-collect.service vigie-tbm-collect-alerts.service vigie-tbm-dashboard.service
 
 #### POUR AFFICHER LES LOG DE LA COLLECT
 ubuntu@ek-hub-vnic:~/Vigie-TBM$ tail -f data/collect.log
