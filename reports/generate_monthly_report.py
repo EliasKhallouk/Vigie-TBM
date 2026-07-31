@@ -816,34 +816,51 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
         for row in worst.itertuples()
     )
 
-    # Format service alerts for "Perturbations en cours"
-    if alerts:
-        alert_items = []
-        seen = set()
-        for a in alerts:
-            key = (a["alert_id"], a["route_id"])
-            if key in seen:
-                continue
-            seen.add(key)
-            start = datetime.fromtimestamp(a["active_period_start"]).strftime("%d/%m")
-            period = f"début {start} (en cours)"
-            if a["active_period_end"]:
-                end = datetime.fromtimestamp(a["active_period_end"]).strftime("%d/%m")
-                period = f"du {start} au {end}"
-            ligne = a["route_id"] if a["route_id"] else "Réseau"
-            header = a["header_text"] or "(information non disponible)"
-            alert_items.append(
-                rf"\item \textbf{{Ligne {latex(ligne)}}} : {latex(header)} ({period})"
+    # Format service alerts for the dedicated "Infos trafic" section,
+    # grouped by ligne and placed just before the methodology.
+    alerts_by_line: dict[str, list[tuple[str, str]]] = {}
+    seen = set()
+    for a in alerts or []:
+        key = (a["alert_id"], a["route_id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        start = datetime.fromtimestamp(a["active_period_start"]).strftime("%d/%m")
+        period = f"début {start} (en cours)"
+        if a["active_period_end"]:
+            end = datetime.fromtimestamp(a["active_period_end"]).strftime("%d/%m")
+            period = f"du {start} au {end}"
+        ligne = a["route_id"] if a["route_id"] else "Réseau"
+        header = a["header_text"] or "(information non disponible)"
+        alerts_by_line.setdefault(ligne, []).append((header, period))
+
+    if alerts_by_line:
+        line_items = []
+        for ligne in sorted(alerts_by_line):
+            details = " ; ".join(
+                f"{latex(header)} ({period})"
+                for header, period in alerts_by_line[ligne]
             )
-        perturbations = (
-            "\n\\vspace{.35cm}\n"
-            "\\textbf{Perturbations en cours}\n"
-            "\\begin{itemize}[leftmargin=1.4em,itemsep=.25em]\n"
-            + "\n".join(alert_items)
-            + "\n\\end{itemize}"
+            line_items.append(rf"\item \textbf{{Ligne {latex(ligne)}}} : {details}")
+        alerts_section = (
+            r"\newpage"
+            r"\section*{Infos trafic}"
+            r"\label{alertspage}"
+            r"{\footnotesize"
+            r"\begin{itemize}[leftmargin=1.2em,itemsep=.3em]"
+            "\n"
+            + "\n".join(line_items)
+            + "\n"
+            + r"\end{itemize}"
+            r"}"
+        )
+        footer_note = (
+            r"\fancyfoot[L]{{\ifnum\value{page}<3\scriptsize\color{alert}\alertmark{} "
+            r"Lignes concernées par des infos trafic — voir page \pageref{alertspage}\fi}}"
         )
     else:
-        perturbations = ""
+        alerts_section = ""
+        footer_note = ""
 
     return rf"""\documentclass[10pt,a4paper]{{article}}
 \usepackage[french]{{babel}}
@@ -856,9 +873,11 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
 \definecolor{{vigielight}}{{HTML}}{{FFFFFF}}
 \definecolor{{alert}}{{HTML}}{{E7007C}}
 \pagestyle{{fancy}}\fancyhf{{}}\lhead{{\textcolor{{vigiebleu}}{{VIGIE TBM}}}}\rhead{{Rapport mensuel}}\cfoot{{\thepage}}
+{footer_note}
 \setlength{{\parindent}}{{0pt}}
 \newcommand{{\kpi}}[3][vigiebleu]{{\begin{{tcolorbox}}[width=.28\textwidth,sharp corners,boxrule=0pt,leftrule=3pt,colback=vigielight,colframe=#1,arc=0pt,outer arc=0pt,left=6pt,right=4pt,top=4pt,bottom=4pt,halign=flush left,valign=top]{{\scriptsize #2\\[3pt]}}{{\Large\bfseries\color{{#1}} #3}}\end{{tcolorbox}}}}
-\newcommand{{\alertmark}}{{\textcolor{{alert}}{{⚠}}}}
+\newfontfamily{{\vigiesym}}[Scale=MatchUppercase]{{Symbola}}
+\newcommand{{\alertmark}}{{\textcolor{{alert}}{{\vigiesym ⚠}}}}
 
 \begin{{document}}
 \begin{{center}}
@@ -900,7 +919,6 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
 \begin{{itemize}}[leftmargin=1.4em,itemsep=.25em]
 {priority_alerts}
 \end{{itemize}}
-{perturbations}
 
 \vfill
 \small\color{{gray}} Source : flux GTFS-RT TripUpdates TBM, données arrêtées au {latex(collected_at)}. Les vingt dernières minutes du flux sont exclues afin de ne considérer que des observations stabilisées.
@@ -923,6 +941,8 @@ def build_latex(month: str, scope: Scope, metrics: dict[str, float | int], chang
 \end{{longtable}}
 
 {graphical_annex(lines, scheduled, network_lines, stop_stats, monthly_evolution, output_dir)}
+
+{alerts_section}
 
 \section*{{Méthode et calcul de la fiabilité}}
 L'indice de fiabilité est un score synthétique (de 0 à 100) conçu pour identifier rapidement les lignes de transport qui posent le plus de difficultés aux usagers.
@@ -952,7 +972,7 @@ Contrairement à une simple mesure de temps, cet indicateur combine deux facteur
 {gap_line}
 {evolution_note}
 
-\textbf{{Alertes travaux.}} Les alertes affichées dans la synthèse exécutive (\alertmark) sont issues du flux ServiceAlerts TBM et sont reproduites à titre indicatif. Elles ne sont pas utilisées pour filtrer ou corriger les indicateurs de ponctualité. La présence d'une alerte sur une ligne ne signifie pas que les retards ou arrêts sautés observés sont causés par les travaux annoncés.
+\textbf{{Alertes travaux.}} Les alertes de la section \textit{{Infos trafic}} (\alertmark) sont issues du flux ServiceAlerts TBM et sont reproduites à titre indicatif. Elles ne sont pas utilisées pour filtrer ou corriger les indicateurs de ponctualité. La présence d'une alerte sur une ligne ne signifie pas que les retards ou arrêts sautés observés sont causés par les travaux annoncés.
 
 \vspace{{.4cm}}
 \hrule\vspace{{.3cm}}

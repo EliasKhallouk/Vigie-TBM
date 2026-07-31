@@ -50,10 +50,10 @@ ubuntu@ek-hub-vnic:~/Vigie-TBM$ tail -f data/collect.log
 
 #### GÉNERER LES RAPPORTS
 ##### Rapport réseau
-./reports/generate_single_report.py --month 2026-07 --network --compile
+.venv/bin/python ./reports/generate_single_report.py --month 2026-07 --network --compile
 
 ##### Rapport commune
-./reports/generate_single_report.py --month 2026-07 --commune "Mérignac" --compile
+.venv/bin/python ./reports/generate_single_report.py --month 2026-07 --commune "Mérignac" --compile
 
 ##### Rapports de toutes les communes + Bordeaux Métropole :
 ./reports/generate_all_reports.py --month 2026-07 --compile
